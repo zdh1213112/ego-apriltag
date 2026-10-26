@@ -1,0 +1,480 @@
+{
+  "family_count": 26,
+  "image_count": 78,
+  "status": "passed",
+  "checks": [
+    "binary pixels only",
+    "exactly one tag with expected ID",
+    "each detected corner within 2 pixels of annotated boundary"
+  ],
+  "results": [
+    {
+      "family": "tag36h10",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag36h10",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag36h10",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag36h11",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag36h11",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag36h11",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tag25h9",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tag25h9",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tag25h9",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tag16h5",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tag16h5",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tag16h5",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagCircle21h7",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagCircle21h7",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagCircle21h7",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagCircle49h12",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00030517578142053026
+    },
+    {
+      "family": "tagCircle49h12",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00030517578142053026
+    },
+    {
+      "family": "tagCircle49h12",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00030517578142053026
+    },
+    {
+      "family": "tagStandard41h12",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagStandard41h12",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagStandard41h12",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0003051757813125278
+    },
+    {
+      "family": "tagStandard52h13",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagStandard52h13",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagStandard52h13",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagCustom48h12",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagCustom48h12",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagCustom48h12",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.000262522133380419
+    },
+    {
+      "family": "tagAruco4x4_50",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_50",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_50",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_100",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_100",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_100",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_250",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_250",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_250",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_1000",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_1000",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco4x4_1000",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00025816229726641725
+    },
+    {
+      "family": "tagAruco5x5_50",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_50",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_50",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_100",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_100",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_100",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_250",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_250",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_250",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_1000",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_1000",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco5x5_1000",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.0002243872248682571
+    },
+    {
+      "family": "tagAruco6x6_50",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_50",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_50",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_100",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_100",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_100",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_250",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_250",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_250",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_1000",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_1000",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco6x6_1000",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagAruco7x7_50",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_50",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_50",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_100",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_100",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_100",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_250",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_250",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_250",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_1000",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_1000",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagAruco7x7_1000",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015728399756891805
+    },
+    {
+      "family": "tagArucoMIP36h12",
+      "id": 0,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagArucoMIP36h12",
+      "id": 1,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    },
+    {
+      "family": "tagArucoMIP36h12",
+      "id": 2,
+      "hamming": 0,
+      "max_corner_error_px": 0.00015258789056815658
+    }
+  ]
+}

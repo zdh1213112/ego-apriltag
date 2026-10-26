@@ -1,0 +1,652 @@
+[
+  {
+    "family": "tag36h10",
+    "group": "apriltag",
+    "ncodes": 2320,
+    "nbits": 36,
+    "minimum_hamming_distance": 10,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "apriltag/tag36h10/id_0000.png"
+  },
+  {
+    "family": "tag36h11",
+    "group": "apriltag",
+    "ncodes": 587,
+    "nbits": 36,
+    "minimum_hamming_distance": 11,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "apriltag/tag36h11/id_0000.png"
+  },
+  {
+    "family": "tag25h9",
+    "group": "apriltag",
+    "ncodes": 35,
+    "nbits": 25,
+    "minimum_hamming_distance": 9,
+    "width_at_border": 7,
+    "total_width": 9,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      120,
+      120,
+      400,
+      400
+    ],
+    "first_image": "apriltag/tag25h9/id_0000.png"
+  },
+  {
+    "family": "tag16h5",
+    "group": "apriltag",
+    "ncodes": 30,
+    "nbits": 16,
+    "minimum_hamming_distance": 5,
+    "width_at_border": 6,
+    "total_width": 8,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 480,
+    "detection_bounds_px": [
+      120,
+      120,
+      360,
+      360
+    ],
+    "first_image": "apriltag/tag16h5/id_0000.png"
+  },
+  {
+    "family": "tagCircle21h7",
+    "group": "apriltag",
+    "ncodes": 38,
+    "nbits": 21,
+    "minimum_hamming_distance": 7,
+    "width_at_border": 5,
+    "total_width": 9,
+    "reversed_border": true,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      160,
+      160,
+      360,
+      360
+    ],
+    "first_image": "apriltag/tagCircle21h7/id_0000.png"
+  },
+  {
+    "family": "tagCircle49h12",
+    "group": "apriltag",
+    "ncodes": 65535,
+    "nbits": 49,
+    "minimum_hamming_distance": 12,
+    "width_at_border": 5,
+    "total_width": 11,
+    "reversed_border": true,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 600,
+    "detection_bounds_px": [
+      200,
+      200,
+      400,
+      400
+    ],
+    "first_image": "apriltag/tagCircle49h12/id_0000.png"
+  },
+  {
+    "family": "tagStandard41h12",
+    "group": "apriltag",
+    "ncodes": 2115,
+    "nbits": 41,
+    "minimum_hamming_distance": 12,
+    "width_at_border": 5,
+    "total_width": 9,
+    "reversed_border": true,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      160,
+      160,
+      360,
+      360
+    ],
+    "first_image": "apriltag/tagStandard41h12/id_0000.png"
+  },
+  {
+    "family": "tagStandard52h13",
+    "group": "apriltag",
+    "ncodes": 48714,
+    "nbits": 52,
+    "minimum_hamming_distance": 13,
+    "width_at_border": 6,
+    "total_width": 10,
+    "reversed_border": true,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      160,
+      160,
+      400,
+      400
+    ],
+    "first_image": "apriltag/tagStandard52h13/id_0000.png"
+  },
+  {
+    "family": "tagCustom48h12",
+    "group": "apriltag",
+    "ncodes": 42211,
+    "nbits": 48,
+    "minimum_hamming_distance": 12,
+    "width_at_border": 6,
+    "total_width": 10,
+    "reversed_border": true,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      160,
+      160,
+      400,
+      400
+    ],
+    "first_image": "apriltag/tagCustom48h12/id_0000.png"
+  },
+  {
+    "family": "tagAruco4x4_50",
+    "group": "aruco",
+    "ncodes": 50,
+    "nbits": 16,
+    "minimum_hamming_distance": 4,
+    "width_at_border": 6,
+    "total_width": 8,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 480,
+    "detection_bounds_px": [
+      120,
+      120,
+      360,
+      360
+    ],
+    "first_image": "aruco/tagAruco4x4_50/id_0000.png"
+  },
+  {
+    "family": "tagAruco4x4_100",
+    "group": "aruco",
+    "ncodes": 100,
+    "nbits": 16,
+    "minimum_hamming_distance": 3,
+    "width_at_border": 6,
+    "total_width": 8,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 480,
+    "detection_bounds_px": [
+      120,
+      120,
+      360,
+      360
+    ],
+    "first_image": "aruco/tagAruco4x4_100/id_0000.png"
+  },
+  {
+    "family": "tagAruco4x4_250",
+    "group": "aruco",
+    "ncodes": 250,
+    "nbits": 16,
+    "minimum_hamming_distance": 3,
+    "width_at_border": 6,
+    "total_width": 8,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 480,
+    "detection_bounds_px": [
+      120,
+      120,
+      360,
+      360
+    ],
+    "first_image": "aruco/tagAruco4x4_250/id_0000.png"
+  },
+  {
+    "family": "tagAruco4x4_1000",
+    "group": "aruco",
+    "ncodes": 1000,
+    "nbits": 16,
+    "minimum_hamming_distance": 2,
+    "width_at_border": 6,
+    "total_width": 8,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 480,
+    "detection_bounds_px": [
+      120,
+      120,
+      360,
+      360
+    ],
+    "first_image": "aruco/tagAruco4x4_1000/id_0000.png"
+  },
+  {
+    "family": "tagAruco5x5_50",
+    "group": "aruco",
+    "ncodes": 50,
+    "nbits": 25,
+    "minimum_hamming_distance": 7,
+    "width_at_border": 7,
+    "total_width": 9,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      120,
+      120,
+      400,
+      400
+    ],
+    "first_image": "aruco/tagAruco5x5_50/id_0000.png"
+  },
+  {
+    "family": "tagAruco5x5_100",
+    "group": "aruco",
+    "ncodes": 100,
+    "nbits": 25,
+    "minimum_hamming_distance": 7,
+    "width_at_border": 7,
+    "total_width": 9,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      120,
+      120,
+      400,
+      400
+    ],
+    "first_image": "aruco/tagAruco5x5_100/id_0000.png"
+  },
+  {
+    "family": "tagAruco5x5_250",
+    "group": "aruco",
+    "ncodes": 250,
+    "nbits": 25,
+    "minimum_hamming_distance": 6,
+    "width_at_border": 7,
+    "total_width": 9,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      120,
+      120,
+      400,
+      400
+    ],
+    "first_image": "aruco/tagAruco5x5_250/id_0000.png"
+  },
+  {
+    "family": "tagAruco5x5_1000",
+    "group": "aruco",
+    "ncodes": 1000,
+    "nbits": 25,
+    "minimum_hamming_distance": 5,
+    "width_at_border": 7,
+    "total_width": 9,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 520,
+    "detection_bounds_px": [
+      120,
+      120,
+      400,
+      400
+    ],
+    "first_image": "aruco/tagAruco5x5_1000/id_0000.png"
+  },
+  {
+    "family": "tagAruco6x6_50",
+    "group": "aruco",
+    "ncodes": 50,
+    "nbits": 36,
+    "minimum_hamming_distance": 13,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "aruco/tagAruco6x6_50/id_0000.png"
+  },
+  {
+    "family": "tagAruco6x6_100",
+    "group": "aruco",
+    "ncodes": 100,
+    "nbits": 36,
+    "minimum_hamming_distance": 12,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "aruco/tagAruco6x6_100/id_0000.png"
+  },
+  {
+    "family": "tagAruco6x6_250",
+    "group": "aruco",
+    "ncodes": 250,
+    "nbits": 36,
+    "minimum_hamming_distance": 11,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "aruco/tagAruco6x6_250/id_0000.png"
+  },
+  {
+    "family": "tagAruco6x6_1000",
+    "group": "aruco",
+    "ncodes": 1000,
+    "nbits": 36,
+    "minimum_hamming_distance": 9,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "aruco/tagAruco6x6_1000/id_0000.png"
+  },
+  {
+    "family": "tagAruco7x7_50",
+    "group": "aruco",
+    "ncodes": 50,
+    "nbits": 49,
+    "minimum_hamming_distance": 19,
+    "width_at_border": 9,
+    "total_width": 11,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 600,
+    "detection_bounds_px": [
+      120,
+      120,
+      480,
+      480
+    ],
+    "first_image": "aruco/tagAruco7x7_50/id_0000.png"
+  },
+  {
+    "family": "tagAruco7x7_100",
+    "group": "aruco",
+    "ncodes": 100,
+    "nbits": 49,
+    "minimum_hamming_distance": 18,
+    "width_at_border": 9,
+    "total_width": 11,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 600,
+    "detection_bounds_px": [
+      120,
+      120,
+      480,
+      480
+    ],
+    "first_image": "aruco/tagAruco7x7_100/id_0000.png"
+  },
+  {
+    "family": "tagAruco7x7_250",
+    "group": "aruco",
+    "ncodes": 250,
+    "nbits": 49,
+    "minimum_hamming_distance": 17,
+    "width_at_border": 9,
+    "total_width": 11,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 600,
+    "detection_bounds_px": [
+      120,
+      120,
+      480,
+      480
+    ],
+    "first_image": "aruco/tagAruco7x7_250/id_0000.png"
+  },
+  {
+    "family": "tagAruco7x7_1000",
+    "group": "aruco",
+    "ncodes": 1000,
+    "nbits": 49,
+    "minimum_hamming_distance": 14,
+    "width_at_border": 9,
+    "total_width": 11,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 600,
+    "detection_bounds_px": [
+      120,
+      120,
+      480,
+      480
+    ],
+    "first_image": "aruco/tagAruco7x7_1000/id_0000.png"
+  },
+  {
+    "family": "tagArucoMIP36h12",
+    "group": "aruco",
+    "ncodes": 250,
+    "nbits": 36,
+    "minimum_hamming_distance": 12,
+    "width_at_border": 8,
+    "total_width": 10,
+    "reversed_border": false,
+    "ids": [
+      0,
+      1,
+      2
+    ],
+    "cell_pixels": 40,
+    "extra_white_margin_cells": 2,
+    "image_width_px": 560,
+    "detection_bounds_px": [
+      120,
+      120,
+      440,
+      440
+    ],
+    "first_image": "aruco/tagArucoMIP36h12/id_0000.png"
+  }
+]

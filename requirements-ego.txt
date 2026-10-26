@@ -1,0 +1,8 @@
+# Python dependencies for the EGO tracker, examples and plots.
+# Build the native AprilTag binding with this same Python/NumPy environment.
+numpy
+opencv-python
+scipy
+PyYAML
+matplotlib
+Pillow

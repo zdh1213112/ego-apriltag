@@ -6,3 +6,18 @@ example/opencv_demo
 example/apriltag_demo
 build/
 
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated tracking videos, observations, plots and local recordings
+/outputs/
+/recordings/
+
+# Local credentials
+/.aws
+/.env
+/.env.*
+!/.env.example

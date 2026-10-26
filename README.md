@@ -1,3 +1,18 @@
+EGO 四相机 AprilTag Python 扩展
+==============================
+
+本项目基于 [AprilRobotics/apriltag](https://github.com/AprilRobotics/apriltag)，
+增加了 Python 图片检测、标签家族示例生成，以及 Orbbec EGO 四相机录制的三维位姿跟踪。
+原始 AprilTag 库、提交历史与许可证保留，官方项目说明见下文。
+
+- [EGO 四相机跟踪：安装、运行、坐标系和输出说明](docs/EGO_MULTICAM.md)
+- [四相机跟踪源码](scripts/track_ego_apriltag.py)
+- [Python 图片检测与单相机位姿示例](example/python_demo.py)
+- [标签家族总览与 tagsize 测量说明](tag_family_examples/README.md)
+- [Python 扩展依赖](requirements-ego.txt)
+
+录制数据与生成的跟踪视频、轨迹、检测缓存写入本地 `outputs/`，不纳入 Git 版本管理。
+
 AprilTag 3
 ==========
 AprilTag is a visual fiducial system popular in robotics research. This repository contains the most recent version of AprilTag, AprilTag 3, which includes a faster (>2x) detector, improved detection rate on small tags, flexible tag layouts, and pose estimation. AprilTag consists of a small C library with minimal dependencies.
