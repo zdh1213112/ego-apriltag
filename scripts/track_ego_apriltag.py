@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline, calibrated four-camera AprilTag tracking for EGOViewer recordings.
+"""Offline, calibrated four-camera multi-tag tracking for EGOViewer recordings.
 
 Output transform convention: p_cam0 = R_cam0_tag @ p_tag + t_cam0_tag.
 The KB model is inverted without OpenCV's peripheral theta clipping.
@@ -181,6 +181,8 @@ def pose_residual(parameters, observations, cameras, points, weighted=True):
 def fit_pose(observations, cameras, size, previous=None, max_error=2.5):
     if not observations:
         return None
+    if len({o["tag_id"] for o in observations if "tag_id" in o}) > 1:
+        raise ValueError("A pose fit must contain observations of only one tag ID")
     points = object_points(size)
     candidates = []
     edge_sizes = []
@@ -282,72 +284,111 @@ def flow_corners(previous_gray, gray, corners):
     return polygon
 
 
-def collect_observations(directory, output, metadata, cameras, timestamps, args):
+@dataclass
+class TagTrackingState:
+    previous_corners: np.ndarray = None
+    rectification_corners: np.ndarray = None
+    last_decoded: int = -100
+
+
+def track_tag(gray, previous_gray, camera, detections, detector, tag_id, state, index, flow_max_frames):
+    matches = [d for d in detections if d["id"] == tag_id]
+    observation = None
+    if len(matches) == 1:
+        detection = matches[0]
+        observation = {"corners": detection["lb-rb-rt-lt"].tolist(),
+                       "margin": float(detection["margin"]),
+                       "hamming": detection["hamming"], "source": "decoded"}
+    if observation is None and state.rectification_corners is not None and index - state.last_decoded <= 8:
+        observation = local_detection(gray, camera, state.rectification_corners, detector, tag_id)
+    if observation is not None:
+        state.last_decoded = index
+    elif previous_gray is not None and state.previous_corners is not None and index - state.last_decoded <= flow_max_frames:
+        tracked = flow_corners(previous_gray, gray, state.previous_corners)
+        if tracked is not None:
+            # Do not let optical flow relabel a different, currently decoded tag.
+            overlaps_other = any(
+                d["id"] != tag_id and cv2.pointPolygonTest(
+                    tracked.astype(np.float32), tuple(np.mean(d["lb-rb-rt-lt"], axis=0)), False) >= 0
+                for d in detections
+            )
+            if not overlaps_other:
+                observation = {"corners": tracked.tolist(), "margin": None,
+                               "hamming": None, "source": "flow"}
+    if observation is not None:
+        observation["tag_id"] = tag_id
+        state.previous_corners = np.array(observation["corners"])
+        state.rectification_corners = state.previous_corners.copy()
+    else:
+        # KLT coordinates must belong to previous_gray, never an older frame.
+        state.previous_corners = None
+    return observation
+
+
+def collect_tag_observations(directory, outputs, metadata, cameras, timestamps, args):
+    """Decode each video frame once, with separate tracking state/cache per ID."""
     from apriltag import apriltag
 
     detector = apriltag(args.family, threads=2, maxhamming=1, decimate=1., refine_edges=True)
-    summaries = {}
+    summaries = {tag_id: {} for tag_id in outputs}
     for camera_id, stream in STREAMS.items():
-        cache = output / f"observations_{camera_id}.json"
-        expected = {"recording": str(directory.resolve()),
-                    "family": args.family, "id": args.tag_id, "frames": args.max_frames,
-                    "flow_max_frames": args.flow_max_frames, "tracking_version": 2}
-        if args.reuse_detections and cache.exists():
-            payload = json.loads(cache.read_text())
-            if payload.get("config") == expected:
-                summaries[camera_id] = payload["frames"]
-                print(f"Reused detections for {camera_id}", flush=True)
-                continue
-            raise ValueError(f"Cached detection settings differ: {cache}")
+        pending = {}
+        for tag_id, output in outputs.items():
+            cache = output / f"observations_{camera_id}.json"
+            expected = {"recording": str(directory.resolve()),
+                        "family": args.family, "id": tag_id, "frames": args.max_frames,
+                        "flow_max_frames": args.flow_max_frames, "tracking_version": 3}
+            if args.reuse_detections and cache.exists():
+                payload = json.loads(cache.read_text())
+                if payload.get("config") != expected:
+                    raise ValueError(f"Cached detection settings differ: {cache}")
+                summaries[tag_id][camera_id] = payload["frames"]
+                print(f"Reused detections for ID {tag_id} / {camera_id}", flush=True)
+            else:
+                pending[tag_id] = (cache, expected)
+        if not pending:
+            continue
         path = directory / metadata["files"][f"video_{stream}"]
         capture = cv2.VideoCapture(str(path))
         if not capture.isOpened():
             raise RuntimeError(f"Cannot open {path}")
         camera = cameras[camera_id]
-        previous_gray, previous_corners, rectification_corners, last_decoded = None, None, None, -100
-        observations = []
+        states = {tag_id: TagTrackingState() for tag_id in pending}
+        observations = {tag_id: [] for tag_id in pending}
+        previous_gray = None
         limit = min(len(timestamps[camera_id]), args.max_frames or len(timestamps[camera_id]))
-        for index in range(limit):
-            ok, image = capture.read()
-            if not ok:
-                raise RuntimeError(f"Early video end: {path}, frame {index}")
-            if image.shape[:2] != (camera.height, camera.width):
-                raise ValueError("Video resolution differs from calibration")
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            matches = [d for d in detector.detect(gray) if d["id"] == args.tag_id and d["margin"] >= 25]
-            observation = None
-            if len(matches) == 1:
-                detection = matches[0]
-                observation = {"corners": detection["lb-rb-rt-lt"].tolist(),
-                               "margin": float(detection["margin"]),
-                               "hamming": detection["hamming"], "source": "decoded"}
-            if observation is None and rectification_corners is not None and index - last_decoded <= 8:
-                observation = local_detection(gray, camera, rectification_corners, detector, args.tag_id)
-            if observation is not None:
-                last_decoded = index
-            elif previous_gray is not None and previous_corners is not None and index - last_decoded <= args.flow_max_frames:
-                tracked = flow_corners(previous_gray, gray, previous_corners)
-                if tracked is not None:
-                    observation = {"corners": tracked.tolist(), "margin": None,
-                                   "hamming": None, "source": "flow"}
-            if observation is not None:
-                observation.update(camera=camera_id, frame=index,
-                                   timestamp_us=int(timestamps[camera_id][index]))
-                previous_corners = np.array(observation["corners"])
-                rectification_corners = previous_corners.copy()
-            else:
-                # KLT coordinates must belong to previous_gray, never an older frame.
-                previous_corners = None
-            previous_gray = gray
-            observations.append(observation)
-            if index % 120 == 0:
-                detected = sum(o is not None for o in observations)
-                print(f"{camera_id} {index + 1}/{limit}: {detected} observed", flush=True)
-        capture.release()
-        payload = {"config": expected, "frames": observations}
-        cache.write_text(json.dumps(payload))
-        summaries[camera_id] = observations
+        try:
+            for index in range(limit):
+                ok, image = capture.read()
+                if not ok:
+                    raise RuntimeError(f"Early video end: {path}, frame {index}")
+                if image.shape[:2] != (camera.height, camera.width):
+                    raise ValueError("Video resolution differs from calibration")
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                detections = [d for d in detector.detect(gray) if d["margin"] >= 25]
+                for tag_id, state in states.items():
+                    observation = track_tag(gray, previous_gray, camera, detections, detector,
+                                            tag_id, state, index, args.flow_max_frames)
+                    if observation is not None:
+                        observation.update(camera=camera_id, frame=index,
+                                           timestamp_us=int(timestamps[camera_id][index]))
+                    observations[tag_id].append(observation)
+                previous_gray = gray
+                if index % 120 == 0:
+                    counts = ", ".join(f"ID {tag_id}: {sum(o is not None for o in values)}"
+                                       for tag_id, values in observations.items())
+                    print(f"{camera_id} {index + 1}/{limit}: {counts} observed", flush=True)
+        finally:
+            capture.release()
+        for tag_id, (cache, expected) in pending.items():
+            cache.write_text(json.dumps({"config": expected, "frames": observations[tag_id]}))
+            summaries[tag_id][camera_id] = observations[tag_id]
     return summaries
+
+
+def collect_observations(directory, output, metadata, cameras, timestamps, args):
+    return collect_tag_observations(directory, {args.tag_id: output}, metadata,
+                                    cameras, timestamps, args)[args.tag_id]
 
 
 class AdaptiveFilter:
@@ -517,7 +558,87 @@ def export_results(output, results, cameras, timestamps, observations, args):
     return summary
 
 
-def plot_results(output, results):
+def aggregate_tag_status(status):
+    """A group is lost only when every tag failed the individual pose gates."""
+    status = np.asarray(status)
+    if status.ndim != 2 or status.shape[1] == 0:
+        raise ValueError("Tag status must have shape (frames, tags), with at least one tag")
+    if not np.all(np.isin(status, ["lost", "flow_only", "measured"])):
+        raise ValueError("Unknown tag tracking status")
+    overall = np.full(status.shape[0], "lost", dtype="U9")
+    overall[np.any(status == "flow_only", axis=1)] = "flow_only"
+    overall[np.any(status == "measured", axis=1)] = "measured"
+    return overall, np.count_nonzero(status != "lost", axis=1)
+
+
+def export_tag_results(output, outputs, summaries):
+    """Combine the per-tag exports, keeping an explicit ID dimension/column."""
+    tag_ids = list(outputs)
+    arrays, tables = [], []
+    header = None
+    for tag_id, directory in outputs.items():
+        with np.load(directory / "poses.npz") as payload:
+            arrays.append({key: payload[key].copy() for key in payload.files})
+        if not np.array_equal(arrays[0]["timestamp_us"], arrays[-1]["timestamp_us"]):
+            raise ValueError("Per-tag pose timestamps must match before combining exports")
+        with (directory / "poses.csv").open(newline="") as stream:
+            reader = csv.reader(stream)
+            current_header = next(reader)
+            if header is not None and current_header != header:
+                raise ValueError("Per-tag pose CSV columns must match")
+            header = current_header
+            tables.append(list(reader))
+    count = len(arrays[0]["timestamp_us"])
+    status = np.stack([array["status"] for array in arrays], axis=1)
+    global_status, n_valid_tags = aggregate_tag_status(status)
+    np.savez_compressed(output / "poses.npz", tag_ids=np.array(tag_ids, dtype=np.int64),
+                        timestamp_us=arrays[0]["timestamp_us"], status=status,
+                        global_status=global_status, n_valid_tags=n_valid_tags,
+                        T_cam0_tag_raw=np.stack([a["T_cam0_tag_raw"] for a in arrays], axis=1),
+                        T_cam0_tag_filtered=np.stack([a["T_cam0_tag_filtered"] for a in arrays], axis=1))
+    with (output / "poses.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["tag_id", "global_status", *header])
+        for index in range(count):
+            for tag_id, table in zip(tag_ids, tables):
+                writer.writerow([tag_id, global_status[index], *table[index]])
+    with (output / "global_tracking.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["frame", "timestamp_us", "time_s", "status", "n_valid_tags",
+                         "n_measured_tags", "active_tag_ids"])
+        times = arrays[0]["timestamp_us"]
+        for index, timestamp in enumerate(times):
+            active = ";".join(str(tag_id) for slot, tag_id in enumerate(tag_ids)
+                              if status[index, slot] != "lost")
+            writer.writerow([index, int(timestamp), (int(timestamp) - int(times[0])) * 1e-6,
+                             global_status[index], int(n_valid_tags[index]),
+                             int(np.count_nonzero(status[index] == "measured")), active])
+    first = summaries[tag_ids[0]]
+    summary = {key: first[key] for key in (
+        "recording", "family", "tagsize_m", "reference_frame", "transform_convention",
+        "extrinsics_translation_input_unit", "output_translation_unit", "camera_model",
+        "timestamp_sync", "limitations",
+    )}
+    summary.update(
+        tag_ids=tag_ids, frames=count,
+        valid_frames=int(np.count_nonzero(global_status != "lost")),
+        lost_frames=int(np.count_nonzero(global_status == "lost")),
+        coverage_percent=float(np.mean(global_status != "lost") * 100),
+        global_measured_frames=int(np.count_nonzero(global_status == "measured")),
+        global_flow_only_frames=int(np.count_nonzero(global_status == "flow_only")),
+        global_status_rule="measured if any tag is measured; otherwise flow_only if any tag is flow_only; otherwise lost",
+        frames_any_tag_valid=int(np.count_nonzero(np.any(status != "lost", axis=1))),
+        frames_all_tags_valid=int(np.count_nonzero(np.all(status != "lost", axis=1))),
+        tags={str(tag_id): {**{key: summaries[tag_id][key] for key in (
+                  "valid_frames", "lost_frames", "decoded_pose_frames", "flow_only_pose_frames",
+                  "reprojection_rms_px_median", "reprojection_rms_px_p95",
+              )}, "output": str(outputs[tag_id].relative_to(output))} for tag_id in tag_ids},
+    )
+    (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return summary
+
+
+def plot_results(output, results, tag_id=None):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -538,7 +659,8 @@ def plot_results(output, results):
     axes[4].set_ylabel("camera views")
     axes[4].set_yticks(range(5))
     axes[4].set_xlabel("Recording time (s)")
-    figure.suptitle("EGO AprilTag tracking in cam_0: raw and causal filtered")
+    prefix = "EGO AprilTag" if tag_id is None else f"Tag ID {tag_id}"
+    figure.suptitle(f"{prefix} tracking in cam_0: raw and causal filtered")
     figure.savefig(output / "trajectory.png", dpi=150)
     plt.close(figure)
     valid = [row for row in results if row["status"] != "lost"]
@@ -557,12 +679,130 @@ def plot_results(output, results):
                 axis.grid(alpha=.25)
         axes[0].legend()
         axes[-1].set_xlabel("Recording time (s)")
-        figure.suptitle("Tag orientation relative to first valid orientation (rotation vector, not Euler angles)")
+        figure.suptitle(f"{prefix}: orientation relative to first valid orientation (rotation vector, not Euler angles)")
         figure.savefig(output / "orientation.png", dpi=150)
         plt.close(figure)
 
 
-def render_video(directory, output, metadata, cameras, frames, results, args):
+def draw_tracking_status(axis, times, tag_ids, status):
+    from matplotlib.colors import ListedColormap
+
+    overall, _ = aggregate_tag_status(status)
+    states = np.column_stack([status, overall]).T
+    codes = np.zeros(states.shape, dtype=int)
+    codes[states == "flow_only"] = 1
+    codes[states == "measured"] = 2
+    dt = float(np.median(np.diff(times))) if len(times) > 1 else 1 / 30
+    edges = np.r_[times[0] - dt / 2, (times[:-1] + times[1:]) / 2, times[-1] + dt / 2]
+    axis.pcolormesh(edges, np.arange(len(tag_ids) + 2), codes,
+                    cmap=ListedColormap(["#df6661", "#edbb48", "#39a977"]),
+                    vmin=0, vmax=2, shading="flat", rasterized=True)
+    axis.set_yticks(np.arange(len(tag_ids) + 1) + .5)
+    axis.set_yticklabels([f"ID {tag_id}" for tag_id in tag_ids] + ["GLOBAL"])
+    axis.invert_yaxis()
+    axis.set_xlim(times[0], times[-1] if len(times) > 1 else times[0] + dt)
+    axis.set_title("Red: lost | Amber: flow only | Green: measured | GLOBAL: any valid ID", fontsize=10)
+    axis.set_xlabel("Recording time (s)")
+
+
+def plot_tag_results(output, tag_results):
+    """Plot separate tag curves together, plus the OR of their valid states."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    tag_ids = list(tag_results)
+    times = np.array([row["time_s"] for row in tag_results[tag_ids[0]]])
+    status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
+    colors = [plt.get_cmap("tab10")(index % 10) for index in range(len(tag_ids))]
+    figure, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True, constrained_layout=True,
+                                gridspec_kw={"height_ratios": [1, 1, 1, .8, 1.1]})
+    for tag_id, color in zip(tag_ids, colors):
+        results = tag_results[tag_id]
+        for key, alpha, width in (("t", .25, .8), ("filtered_t", 1., 1.2)):
+            positions = np.array([row.get(key, [np.nan] * 3) for row in results])
+            for dimension, axis in enumerate(axes[:3]):
+                axis.plot(times, positions[:, dimension], color=color, alpha=alpha, lw=width,
+                          label=f"ID {tag_id}" if key == "filtered_t" else None)
+        axes[3].plot(times, [row.get("rms", np.nan) for row in results], color=color, lw=.9)
+    for dimension, axis in enumerate(axes[:3]):
+        axis.set_ylabel(f"{'XYZ'[dimension]} (m)")
+        axis.grid(alpha=.25)
+    axes[0].legend(loc="upper right", ncol=len(tag_ids))
+    axes[3].set_ylabel("reproj RMS (px)")
+    axes[3].grid(alpha=.25)
+    draw_tracking_status(axes[4], times, tag_ids, status)
+    figure.suptitle("All tags in cam_0: position overview (solid: filtered, faint: raw)")
+    figure.savefig(output / "trajectory.png", dpi=150)
+    plt.close(figure)
+
+    figure, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True, constrained_layout=True,
+                                gridspec_kw={"height_ratios": [1, 1, 1, 1.1]})
+    for tag_id, color in zip(tag_ids, colors):
+        results = tag_results[tag_id]
+        valid = [row for row in results if row["status"] != "lost"]
+        if not valid:
+            axes[0].plot([], [], color=color, label=f"ID {tag_id} (no valid pose)")
+            continue
+        initial = valid[0]["R"]
+        for key, alpha, width in (("R", .25, .8), ("filtered_R", 1., 1.2)):
+            vectors = np.array([
+                np.rad2deg(Rotation.from_matrix(initial.T @ row[key]).as_rotvec())
+                if row["status"] != "lost" else [np.nan] * 3 for row in results
+            ])
+            for dimension, axis in enumerate(axes[:3]):
+                axis.plot(times, vectors[:, dimension], color=color, alpha=alpha, lw=width,
+                          label=f"ID {tag_id}" if key == "filtered_R" else None)
+    for dimension, axis in enumerate(axes[:3]):
+        axis.set_ylabel(f"rotvec {'XYZ'[dimension]} (deg)")
+        axis.grid(alpha=.25)
+    axes[0].legend(loc="upper right", ncol=len(tag_ids))
+    draw_tracking_status(axes[3], times, tag_ids, status)
+    figure.suptitle("Orientation overview: each ID relative to its own first valid orientation\n"
+                    "Solid: filtered | Faint: raw | Separate tag frames")
+    figure.savefig(output / "orientation.png", dpi=150)
+    plt.close(figure)
+
+    figure, axis = plt.subplots(figsize=(14, 3), constrained_layout=True)
+    draw_tracking_status(axis, times, tag_ids, status)
+    overall, _ = aggregate_tag_status(status)
+    valid_count = int(np.count_nonzero(overall != "lost"))
+    figure.suptitle(f"Overall tracking: {valid_count}/{len(times)} valid frames ({valid_count / len(times):.1%})")
+    figure.savefig(output / "tracking_status.png", dpi=150)
+    plt.close(figure)
+
+
+def draw_tag_overlay(image, camera, observation, result, tag_id, axes):
+    scale = np.array([image.shape[1] / camera.width, image.shape[0] / camera.height])
+    color = ((0, 230, 255), (255, 210, 80), (240, 130, 255), (80, 255, 180))[tag_id % 4]
+    label_at = None
+    if observation is not None:
+        corners = np.rint(np.array(observation["corners"]) * scale).astype(np.int32)
+        outline = (0, 180, 255) if observation["source"] == "flow" else color
+        cv2.polylines(image, [corners], True, outline, 1, cv2.LINE_AA)
+        label_at = corners.min(0) + [0, -5]
+    if result["status"] != "lost":
+        # The causal filter lags image motion; overlay the current-frame fit.
+        pixels = project_pose(camera, result["R"], result["t"], axes) * scale
+        if np.all(np.isfinite(pixels)) and np.all(np.abs(pixels) < 5000):
+            for j, axis_color in enumerate(((0, 0, 255), (0, 255, 0), (255, 0, 0)), 1):
+                cv2.line(image, tuple(np.rint(pixels[0]).astype(int)),
+                         tuple(np.rint(pixels[j]).astype(int)), axis_color, 2, cv2.LINE_AA)
+            if label_at is None:
+                label_at = np.rint(pixels[0]).astype(int) + [5, -5]
+    if label_at is not None and np.all(label_at >= 0) and np.all(label_at < image.shape[1::-1]):
+        position = tuple(np.asarray(label_at, dtype=int))
+        cv2.putText(image, f"ID {tag_id}", position, cv2.FONT_HERSHEY_SIMPLEX,
+                    .4, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, f"ID {tag_id}", position, cv2.FONT_HERSHEY_SIMPLEX,
+                    .4, color, 1, cv2.LINE_AA)
+
+
+def render_tag_video(directory, output, metadata, cameras, tag_frames, tag_results, args):
+    tag_ids = list(tag_results)
+    results = tag_results[tag_ids[0]]
+    status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
+    global_status, _ = aggregate_tag_status(status)
     writer = cv2.VideoWriter(str(output / "tracking_preview.mp4"), cv2.VideoWriter_fourcc(*"mp4v"),
                              30., (1280, 800))
     if not writer.isOpened():
@@ -582,22 +822,11 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
             if not ok:
                 raise RuntimeError(f"Preview video ended early: {stream}")
             image = cv2.resize(image, (640, 400), interpolation=cv2.INTER_AREA)
-            found = next((o for o in frames[index] if o["camera"] == camera_id), None)
-            if found is not None:
-                corners = np.rint(np.array(found["corners"]) / 3).astype(np.int32)
-                color = (0, 255, 0) if found["source"] != "flow" else (0, 180, 255)
-                cv2.polylines(image, [corners], True, color, 1, cv2.LINE_AA)
-            if result["status"] != "lost":
-                # The causal filter lags image motion. Use the current-frame fit
-                # for overlays so the axes stay attached to the observed tag.
-                R, t = result["R"], result["t"]
-                camera = cameras[camera_id]
-                pixels = project_pose(camera, R, t, axes) / 3
-                if np.all(np.isfinite(pixels)) and np.all(np.abs(pixels) < 5000):
-                    for j, color in enumerate(((0, 0, 255), (0, 255, 0), (255, 0, 0)), 1):
-                        cv2.line(image, tuple(np.rint(pixels[0]).astype(int)),
-                                 tuple(np.rint(pixels[j]).astype(int)), color, 2, cv2.LINE_AA)
-            cv2.rectangle(image, (0, 0), (640, 50), (12, 12, 12), -1)
+            for tag_id in tag_ids:
+                found = next((o for o in tag_frames[tag_id][index] if o["camera"] == camera_id), None)
+                draw_tag_overlay(image, cameras[camera_id], found,
+                                 tag_results[tag_id][index], tag_id, axes)
+            cv2.rectangle(image, (0, 0), (640, 70 if len(tag_ids) > 1 else 50), (12, 12, 12), -1)
             cv2.putText(image, f'{camera_id} / {stream} | {result["time_s"]:.2f}s',
                         (10, 19), cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 255, 255), 1, cv2.LINE_AA)
             cv2.putText(image, "raw axes:", (447, 19), cv2.FONT_HERSHEY_SIMPLEX,
@@ -606,7 +835,20 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
                                     (608, "Z", (255, 0, 0))):
                 cv2.putText(image, label, (x, 19), cv2.FONT_HERSHEY_SIMPLEX,
                             .5, color, 1, cv2.LINE_AA)
-            if result["status"] != "lost":
+            if len(tag_ids) > 1:
+                states = []
+                for tag_id in tag_ids:
+                    current = tag_results[tag_id][index]
+                    state = "LOST" if current["status"] == "lost" else f'{current["status"]}/{current["n_views"]}v'
+                    states.append(f"ID {tag_id}: {state}")
+                text = " | ".join(states)
+                active = ",".join(str(tag_id) for slot, tag_id in enumerate(tag_ids)
+                                  if status[index, slot] != "lost")
+                overall = global_status[index]
+                global_text = "GLOBAL: LOST" if overall == "lost" else f"GLOBAL: TRACKING ({overall}) | active IDs: {active}"
+                cv2.putText(image, global_text, (10, 61), cv2.FONT_HERSHEY_SIMPLEX, .45,
+                            (60, 80, 255) if overall == "lost" else (80, 240, 120), 1, cv2.LINE_AA)
+            elif result["status"] != "lost":
                 t = result["t"]
                 text = f'{result["status"]} views={result["n_views"]} xyz(m)={t[0]:.3f},{t[1]:.3f},{t[2]:.3f}'
             else:
@@ -635,12 +877,19 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
         capture.release()
 
 
-def main():
+def render_video(directory, output, metadata, cameras, frames, results, args):
+    render_tag_video(directory, output, metadata, cameras, {args.tag_id: frames},
+                     {args.tag_id: results}, args)
+
+
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("recording", type=Path)
     parser.add_argument("--tagsize", type=float, required=True, help="Detection-square side in meters")
     parser.add_argument("--family", default="tag36h11")
-    parser.add_argument("--tag-id", type=int, default=0)
+    tags = parser.add_mutually_exclusive_group()
+    tags.add_argument("--tag-id", type=int, help="Track one ID (default: 0)")
+    tags.add_argument("--tag-ids", type=int, nargs="+", help="Track multiple IDs, e.g. --tag-ids 0 1 2")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/ego_multicam")
     parser.add_argument("--max-frames", type=int, default=0, help="0 processes the entire recording")
     parser.add_argument("--max-sync-us", type=int, default=1000)
@@ -650,28 +899,58 @@ def main():
     parser.add_argument("--cutoff", type=float, default=4., help="Minimum causal filter cutoff, Hz")
     parser.add_argument("--reuse-detections", action="store_true")
     parser.add_argument("--no-video", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.tag_id is None:
+        args.tag_id = 0
     if not np.isfinite(args.tagsize) or args.tagsize <= 0 or args.max_frames < 0:
         parser.error("tagsize must be positive and max-frames nonnegative")
-    if args.flow_max_frames < 0 or args.tag_id < 0 or args.max_sync_us < 0:
+    tag_ids = args.tag_ids if args.tag_ids is not None else [args.tag_id]
+    if args.flow_max_frames < 0 or min(tag_ids) < 0 or args.max_sync_us < 0:
         parser.error("flow-max-frames, tag-id and max-sync-us must be nonnegative")
+    if len(set(tag_ids)) != len(tag_ids):
+        parser.error("tag-ids must not contain duplicates")
     if not np.isfinite(args.cutoff) or args.cutoff <= 0 or not np.isfinite(args.max_reprojection) or args.max_reprojection <= 0:
         parser.error("cutoff and max-reprojection must be positive finite values")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    tag_ids = args.tag_ids if args.tag_ids is not None else [args.tag_id]
     args.output.mkdir(parents=True, exist_ok=True)
+    outputs = {tag_id: args.output / f"tag_{tag_id}" if len(tag_ids) > 1 else args.output
+               for tag_id in tag_ids}
+    for output in outputs.values():
+        output.mkdir(parents=True, exist_ok=True)
     metadata, cameras, timestamps = load_recording(args.recording)
     started = time.monotonic()
-    observations = collect_observations(args.recording, args.output, metadata, cameras, timestamps, args)
+    observations = collect_tag_observations(args.recording, outputs, metadata, cameras, timestamps, args)
     limit = min(len(timestamps["cam_0"]), args.max_frames or len(timestamps["cam_0"]))
-    frames = associate_frames(observations, timestamps, args.max_sync_us, limit)
-    results = solve_sequence(frames, timestamps, cameras, args)
-    summary = export_results(args.output, results, cameras, timestamps, observations, args)
-    plot_results(args.output, results)
+    frames, results, summaries = {}, {}, {}
+    for tag_id, output in outputs.items():
+        tag_args = argparse.Namespace(**{**vars(args), "tag_id": tag_id})
+        print(f"Solving tag ID {tag_id}", flush=True)
+        frames[tag_id] = associate_frames(observations[tag_id], timestamps, args.max_sync_us, limit)
+        results[tag_id] = solve_sequence(frames[tag_id], timestamps, cameras, tag_args)
+        summaries[tag_id] = export_results(output, results[tag_id], cameras, timestamps,
+                                           observations[tag_id], tag_args)
+        plot_results(output, results[tag_id], tag_id=tag_id)
+    summary = export_tag_results(args.output, outputs, summaries) if len(tag_ids) > 1 else summaries[tag_ids[0]]
+    if len(tag_ids) > 1:
+        plot_tag_results(args.output, results)
     if not args.no_video:
-        render_video(args.recording, args.output, metadata, cameras, frames, results, args)
-    print(json.dumps({"frames": summary["frames"], "valid": summary["valid_frames"],
-                      "rms_median_px": summary["reprojection_rms_px_median"],
-                      "elapsed_s": round(time.monotonic() - started, 1),
-                      "output": str(args.output)}, indent=2), flush=True)
+        render_tag_video(args.recording, args.output, metadata, cameras, frames, results, args)
+    report = {"frames": summary["frames"], "elapsed_s": round(time.monotonic() - started, 1),
+              "output": str(args.output)}
+    if len(tag_ids) == 1:
+        report.update(valid=summary["valid_frames"], rms_median_px=summary["reprojection_rms_px_median"])
+    else:
+        report["global"] = {"valid": summary["valid_frames"], "lost": summary["lost_frames"],
+                            "coverage_percent": round(summary["coverage_percent"], 2)}
+        report["tags"] = {str(tag_id): {"valid": summaries[tag_id]["valid_frames"],
+                                       "rms_median_px": summaries[tag_id]["reprojection_rms_px_median"]}
+                          for tag_id in tag_ids}
+    print(json.dumps(report, indent=2), flush=True)
 
 
 if __name__ == "__main__":

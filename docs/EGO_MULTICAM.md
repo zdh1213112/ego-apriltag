@@ -66,6 +66,33 @@ python3 scripts/track_ego_apriltag.py /path/to/EGO_recording \
   --output outputs/my_recording
 ```
 
+多个同尺寸标签可以在一次处理中同时跟踪，例如三个 40 mm 的 `tag36h11`：
+
+```bash
+python3 scripts/track_ego_apriltag.py \
+  recordings/EGO-4B_AZLCA610091_20261027_182506 \
+  --family tag36h11 --tag-ids 0 1 2 --tagsize 0.040 \
+  --output outputs/ego_20261027_182506
+```
+
+`--tag-ids` 与单码参数 `--tag-id` 二选一。每帧共享全图解码，每个 ID 独立维护角点、
+光流、位姿和滤波状态；四相机仅融合相同 ID 的观测。身份由码字决定，转动后不会按画面左右位置重新编号。
+标签不可见时，该 ID 独立标记为 `lost`，其余标签继续跟踪。`--tagsize 0.040` 表示每个码的检测边长为 40 mm。
+
+多码输出目录中，`tag_0/`、`tag_1/`、`tag_2/` 分别保存与单码相同的位姿、统计、轨迹图和检测缓存。
+根目录的 `tracking_preview.mp4` 同时标注各 ID 和坐标轴，`summary.json` 汇总各码质量与覆盖率；
+根目录 `poses.csv` 每帧每码一行，并增加 `tag_id` 列，包含丢失状态。
+根目录 `poses.npz` 的变换数组形状为 `(帧数, 标签数, 4, 4)`，`status` 为 `(帧数, 标签数)`，
+第二维的顺序由 `tag_ids` 数组指定：
+
+```python
+import numpy as np
+
+result = np.load("outputs/ego_20261027_182506/poses.npz")
+slot = np.flatnonzero(result["tag_ids"] == 2)[0]
+T_cam0_tag2 = result["T_cam0_tag_raw"][:, slot]
+```
+
 常用选项：
 
 - `--max-frames 120`：先处理前 120 帧检查数据。
@@ -74,6 +101,8 @@ python3 scripts/track_ego_apriltag.py /path/to/EGO_recording \
 - `--flow-max-frames 15`：最多 15 帧没有重新解码时继续角点跟踪，30 fps 时约 0.5 秒。
 - `--flow-max-frames 0`：关闭光流续跟踪。
 - `--cutoff 4`：平滑滤波的最低截止频率，单位 Hz。
+
+旧版跟踪缓存的设置校验版本不同，更新代码后首次运行请不带 `--reuse-detections`，重新生成缓存。
 
 ## 四路如何融合
 
@@ -128,7 +157,8 @@ t = T[:3, 3]  # 米
 python3 -m unittest discover -s test -p test_ego_multicam.py -v
 ```
 
-测试覆盖 KB 投影与反解、相机外参和三角测量尺度、异常相机剔除、时间戳关联，以及光流位姿门限。
+测试覆盖 KB 投影与反解、相机外参和三角测量尺度、异常相机剔除、时间戳关联、光流位姿门限，
+以及多码共享检测、ID 隔离、缓存复用和多码位姿导出。
 
 ## 同步官方更新
 
