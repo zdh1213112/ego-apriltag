@@ -94,6 +94,9 @@ KB 模型为 `theta_d = theta + k1*theta^3 + k2*theta^5 + k3*theta^7 + k4*theta^
 ## 坐标和结果
 
 相机坐标：X 向右、Y 向下、Z 向前。标签坐标原点在标签中心。
+按标签标准图案正向观察，标签 X 向右、Y 向下、Z 垂直指向标签背面，符合右手系。
+标签旋转后，坐标轴随解码出的图案方向旋转，并不固定沿视频画面的右、下方向。
+预览中红色为 X、绿色为 Y、蓝色为 Z；叠加使用当前帧的 raw 位姿，避免因果平滑的延迟使坐标轴偏离标签。
 
 ```python
 import numpy as np
@@ -107,7 +110,7 @@ t = T[:3, 3]  # 米
 
 - `poses.csv`：时间戳、状态、使用相机数、重投影误差、raw/filtered 位置和四元数。
 - `poses.npz`：逐帧四阶变换矩阵与状态。
-- `tracking_preview.mp4`：四路角点和三维坐标轴叠加视频。
+- `tracking_preview.mp4`：四路角点和当前帧 raw 三维坐标轴叠加视频，`xyz(m)` 也使用 raw 位置。
 - `camera_previews/`：各路独立预览。
 - `trajectory.png`、`orientation.png`：位置与朝向曲线。
 - `summary.json`：覆盖率、观测来源与质量统计。

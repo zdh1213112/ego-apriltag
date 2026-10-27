@@ -96,9 +96,11 @@ def load_recording(directory):
         cameras[camera.id] = camera
     if not np.allclose(cameras["cam_0"].R, np.eye(3)) or np.linalg.norm(cameras["cam_0"].t) > 1e-6:
         raise ValueError("cam_0 must be the reference camera")
+    # EGOViewer PTS CSVs may include optional gap/sequence columns (including blanks).
+    # Only the first column, timestamp_us, is needed for frame association.
     timestamps = {
         camera_id: np.loadtxt(directory / metadata["files"][f"video_{stream}_pts"],
-                              dtype=np.int64, skiprows=1, ndmin=1)
+                              delimiter=",", usecols=0, dtype=np.int64, skiprows=1, ndmin=1)
         for camera_id, stream in STREAMS.items()
     }
     return metadata, cameras, timestamps
@@ -586,7 +588,9 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
                 color = (0, 255, 0) if found["source"] != "flow" else (0, 180, 255)
                 cv2.polylines(image, [corners], True, color, 1, cv2.LINE_AA)
             if result["status"] != "lost":
-                R, t = result["filtered_R"], result["filtered_t"]
+                # The causal filter lags image motion. Use the current-frame fit
+                # for overlays so the axes stay attached to the observed tag.
+                R, t = result["R"], result["t"]
                 camera = cameras[camera_id]
                 pixels = project_pose(camera, R, t, axes) / 3
                 if np.all(np.isfinite(pixels)) and np.all(np.abs(pixels) < 5000):
@@ -596,8 +600,14 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
             cv2.rectangle(image, (0, 0), (640, 50), (12, 12, 12), -1)
             cv2.putText(image, f'{camera_id} / {stream} | {result["time_s"]:.2f}s',
                         (10, 19), cv2.FONT_HERSHEY_SIMPLEX, .5, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(image, "raw axes:", (447, 19), cv2.FONT_HERSHEY_SIMPLEX,
+                        .45, (255, 255, 255), 1, cv2.LINE_AA)
+            for x, label, color in ((543, "X", (0, 0, 255)), (575, "Y", (0, 255, 0)),
+                                    (608, "Z", (255, 0, 0))):
+                cv2.putText(image, label, (x, 19), cv2.FONT_HERSHEY_SIMPLEX,
+                            .5, color, 1, cv2.LINE_AA)
             if result["status"] != "lost":
-                t = result["filtered_t"]
+                t = result["t"]
                 text = f'{result["status"]} views={result["n_views"]} xyz(m)={t[0]:.3f},{t[1]:.3f},{t[2]:.3f}'
             else:
                 text = 'LOST - no reliable pose'

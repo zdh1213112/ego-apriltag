@@ -1,7 +1,9 @@
 """Numerical checks for calibrated EGO tracking; run with python3 -m unittest."""
 
+import json
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 
@@ -10,7 +12,45 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from track_ego_apriltag import Camera, associate_frames, fit_pose, object_points, solve_sequence, triangulate
+from track_ego_apriltag import (
+    Camera, STREAMS, associate_frames, fit_pose, load_recording, object_points,
+    solve_sequence, triangulate,
+)
+
+
+class RecordingTests(unittest.TestCase):
+    def test_load_recording_accepts_single_and_multi_column_timestamps(self):
+        expected = [1793091404379147, 1793091404412482]
+        formats = {
+            "single_column": "timestamp_us\n1793091404379147\n1793091404412482\n",
+            "multi_column": ("timestamp_us,timestamp_gap,sequence\n"
+                             "1793091404379147,,781\n1793091404412482,33335,782\n"),
+            "single_frame": "timestamp_us,timestamp_gap,sequence\n1793091404379147,,781\n",
+        }
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            calibration = {"cameras": [
+                {"id": camera_id, "distortion_model": "KB",
+                 "intrinsics": {"fx": 505., "fy": 506., "cx": 940., "cy": 590.},
+                 "distortion": {f"k{i}": 0. for i in range(1, 5)},
+                 "extrinsics": {"rotation": np.eye(3).tolist(), "translation": [0., 0., 0.]},
+                 "image_width": 1920, "image_height": 1200}
+                for camera_id in STREAMS
+            ]}
+            (directory / "calibration.yaml").write_text(json.dumps(calibration))
+            files = {"calibration_camera": "calibration.yaml"}
+            files.update({f"video_{stream}_pts": f"{stream}.csv" for stream in STREAMS.values()})
+            (directory / "meta_test.json").write_text(json.dumps({"files": files}))
+            for name, contents in formats.items():
+                with self.subTest(format=name):
+                    for stream in STREAMS.values():
+                        (directory / f"{stream}.csv").write_text(contents)
+                    _, cameras, timestamps = load_recording(directory)
+                    self.assertEqual(set(cameras), set(STREAMS))
+                    self.assertEqual(set(timestamps), set(STREAMS))
+                    for values in timestamps.values():
+                        self.assertEqual(values.dtype, np.dtype("int64"))
+                        np.testing.assert_array_equal(values, expected[:1] if name == "single_frame" else expected)
 
 
 class GeometryTests(unittest.TestCase):

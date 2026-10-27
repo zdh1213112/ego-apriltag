@@ -15,6 +15,7 @@ venv/
 # Generated tracking videos, observations, plots and local recordings
 /outputs/
 /recordings/
+/output/
 
 # Local credentials
 /.aws
