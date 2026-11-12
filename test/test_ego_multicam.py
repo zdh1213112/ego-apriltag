@@ -17,13 +17,35 @@ from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from track_ego_apriltag import (
-    Camera, STREAMS, TagTrackingState, associate_frames, collect_tag_observations,
-    export_results, export_tag_results, fit_pose, load_recording, object_points,
-    parse_args, solve_sequence, track_tag, triangulate,
+    Camera, STREAMS, TagTrackingState, aggregate_tag_status, associate_frames, collect_tag_observations,
+    estimate_tag_alignment, export_global_results, export_results, export_tag_results,
+    fit_pose, fuse_tag_results, load_recording, main, matrix, object_points, parse_args,
+    solve_sequence, track_tag, triangulate,
 )
 
 
 class RecordingTests(unittest.TestCase):
+    def test_invalid_recording_directory_has_an_actionable_error(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "does not exist or is not a directory"):
+                load_recording(root / "missing")
+            with self.assertRaisesRegex(ValueError, "original EGOViewer recording directory"):
+                load_recording(root)
+            (root / "meta_first.json").write_text("{}")
+            (root / "meta_second.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "Multiple meta_\\*.json"):
+                load_recording(root)
+
+    def test_invalid_input_fails_before_creating_output_directories(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "results"
+            with self.assertRaisesRegex(SystemExit, "No meta_\\*.json"):
+                main([str(root), "--tagsize", "0.03", "--tag-ids", "0", "1", "2",
+                      "--output", str(output)])
+            self.assertFalse(output.exists())
+
     def test_single_and_multi_tag_arguments(self):
         base = ["recording", "--tagsize", "0.04"]
         self.assertEqual(parse_args(base).tag_id, 0)
@@ -122,6 +144,103 @@ class MultiTagDetectionTests(unittest.TestCase):
         self.assertEqual(independent["source"], "decoded")
 
 
+class GlobalTrackingTests(unittest.TestCase):
+    def rigid_sequences(self):
+        offsets = {
+            0: np.eye(4),
+            1: matrix(Rotation.from_euler("z", 90, degrees=True).as_matrix(), np.array([.04, 0., .02])),
+            2: matrix(Rotation.from_euler("y", -60, degrees=True).as_matrix(), np.array([.08, .01, .04])),
+        }
+        visible = {0: set(range(4)), 1: set(range(9)), 2: set(range(4, 8)) | {9, 10, 11}}
+        tracks = {tag_id: [] for tag_id in offsets}
+        expected = []
+        for index in range(13):
+            pose = matrix(Rotation.from_rotvec(np.array([.02, -.01, .03]) * index).as_matrix(),
+                          np.array([.1 + .005 * index, .2, .4 + .002 * index]))
+            expected.append(pose)
+            for tag_id, offset in offsets.items():
+                row = {"frame": index, "timestamp_us": 1000000 + index * 33333,
+                       "time_s": index * .033333, "status": "lost"}
+                if index in visible[tag_id]:
+                    observed = pose @ offset
+                    views = 4 if tag_id == 0 else 2
+                    row.update(status="flow_only" if index == 11 else "measured",
+                               R=observed[:3, :3], t=observed[:3, 3], n_views=views,
+                               rms=.4 if tag_id == 0 else .7,
+                               cameras=[f"cam_{i}" for i in range(views)])
+                tracks[tag_id].append(row)
+        return tracks, np.array(expected), offsets
+
+    def test_alignment_can_connect_tags_without_direct_overlap(self):
+        tracks, _, offsets = self.rigid_sequences()
+        alignment = estimate_tag_alignment(tracks)
+        self.assertEqual(alignment["paths"]["2"], [0, 1, 2])
+        for tag_id, expected in offsets.items():
+            np.testing.assert_allclose(alignment["T_reference_tag"][str(tag_id)], expected, atol=1e-12)
+
+    def test_switching_visible_id_preserves_one_reference_pose(self):
+        tracks, expected, _ = self.rigid_sequences()
+        results, _ = fuse_tag_results(tracks)
+        for index in range(12):
+            np.testing.assert_allclose(matrix(results[index]["R"], results[index]["t"]), expected[index], atol=1e-12)
+        self.assertEqual(results[8]["source_tag_ids"], [1])
+        self.assertEqual(results[10]["source_tag_ids"], [2])
+        self.assertEqual(results[11]["status"], "flow_only")
+        self.assertEqual(results[12]["status"], "lost")
+        self.assertNotIn("t", results[12])
+
+    def test_alignment_and_fusion_reject_a_large_pose_outlier(self):
+        tracks, expected, offsets = self.rigid_sequences()
+        tracks[1][0]["t"] = tracks[1][0]["t"] + [.2, 0., 0.]
+        results, alignment = fuse_tag_results(tracks)
+        np.testing.assert_allclose(alignment["T_reference_tag"]["1"], offsets[1], atol=1e-12)
+        self.assertEqual(results[0]["source_tag_ids"], [0])
+        np.testing.assert_allclose(results[0]["t"], expected[0, :3, 3], atol=1e-12)
+
+    def test_disconnected_visible_tags_cannot_be_stitched_without_alignment(self):
+        tracks, _, _ = self.rigid_sequences()
+        for row in tracks[1][:4] + tracks[2]:
+            row["status"] = "lost"
+        with self.assertRaisesRegex(ValueError, "Cannot align tag IDs"):
+            fuse_tag_results(tracks)
+
+    def test_global_pose_export_is_one_pose_per_frame_with_nan_for_loss(self):
+        tracks, expected, _ = self.rigid_sequences()
+        results, alignment = fuse_tag_results(tracks)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            export_global_results(root, results, alignment, list(tracks))
+            with np.load(root / "global_poses.npz") as data:
+                self.assertEqual(data["T_cam0_global_raw"].shape, (13, 4, 4))
+                np.testing.assert_allclose(data["T_cam0_global_raw"][:12], expected[:12], atol=1e-12)
+                self.assertTrue(np.isnan(data["T_cam0_global_raw"][12]).all())
+                np.testing.assert_array_equal(data["source_mask"][10], [False, False, True])
+                self.assertEqual(int(data["reference_tag_id"]), 0)
+            with (root / "global_poses.csv").open() as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), 13)
+            self.assertEqual(rows[10]["source_tag_ids"], "2")
+            self.assertAlmostEqual(float(rows[10]["raw_t_m_x"]), expected[10, 0, 3])
+            self.assertEqual(rows[12]["status"], "lost")
+
+    def test_global_is_lost_only_when_all_tags_are_lost(self):
+        status = np.array([
+            ["lost", "lost", "lost"],
+            ["measured", "lost", "lost"],
+            ["lost", "measured", "lost"],
+            ["lost", "lost", "flow_only"],
+            ["flow_only", "measured", "flow_only"],
+        ])
+        overall, counts = aggregate_tag_status(status)
+        np.testing.assert_array_equal(overall, ["lost", "measured", "measured", "flow_only", "measured"])
+        np.testing.assert_array_equal(counts, [0, 1, 1, 1, 3])
+
+    def test_invalid_status_cannot_count_as_stable_tracking(self):
+        for status in (np.array([["detected"]]), np.empty((2, 0)), np.array(["measured"])):
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                aggregate_tag_status(status)
+
+
 class GeometryTests(unittest.TestCase):
     def setUp(self):
         K = np.array([[505., 0, 940.], [0, 506., 590.], [0, 0, 1.]])
@@ -206,10 +325,15 @@ class GeometryTests(unittest.TestCase):
             summary = export_tag_results(root, outputs, summaries)
             self.assertEqual(summary["frames_any_tag_valid"], 2)
             self.assertEqual(summary["frames_all_tags_valid"], 0)
+            self.assertEqual(summary["valid_frames"], 2)
+            self.assertEqual(summary["lost_frames"], 0)
+            self.assertEqual(summary["coverage_percent"], 100.)
             with np.load(root / "poses.npz") as payload:
                 np.testing.assert_array_equal(payload["tag_ids"], [1, 0])
                 np.testing.assert_array_equal(payload["timestamp_us"], times["cam_0"])
                 np.testing.assert_array_equal(payload["status"], [["lost", "measured"], ["measured", "lost"]])
+                np.testing.assert_array_equal(payload["global_status"], ["measured", "measured"])
+                np.testing.assert_array_equal(payload["n_valid_tags"], [1, 1])
                 self.assertEqual(payload["T_cam0_tag_raw"].shape, (2, 2, 4, 4))
                 np.testing.assert_allclose(payload["T_cam0_tag_raw"][1, 0, :3, 3], positions[1], atol=1e-6)
                 np.testing.assert_allclose(payload["T_cam0_tag_raw"][0, 1, :3, 3], positions[0], atol=1e-6)
@@ -218,6 +342,12 @@ class GeometryTests(unittest.TestCase):
                 rows = list(csv.DictReader(stream))
             self.assertEqual([(int(row["frame"]), int(row["tag_id"])) for row in rows],
                              [(0, 1), (0, 0), (1, 1), (1, 0)])
+            self.assertTrue(all(row["global_status"] == "measured" for row in rows))
+            self.assertEqual(rows[0]["status"], "lost")
+            with (root / "global_tracking.csv").open() as stream:
+                overall_rows = list(csv.DictReader(stream))
+            self.assertEqual([row["active_tag_ids"] for row in overall_rows], ["0", "1"])
+            self.assertTrue(all(row["status"] == "measured" for row in overall_rows))
 
     def test_timestamp_association_uses_time_instead_of_frame_number(self):
         times = {"cam_0": np.array([10000, 43333]), "cam_1": np.array([500, 10008, 43339])}

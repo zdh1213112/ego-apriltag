@@ -75,7 +75,17 @@ class Camera:
 
 
 def load_recording(directory):
-    metadata = json.loads(next(directory.glob("meta_*.json")).read_text())
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise ValueError(f"Recording directory does not exist or is not a directory: {directory}")
+    metadata_paths = sorted(directory.glob("meta_*.json"))
+    if not metadata_paths:
+        raise ValueError(f"No meta_*.json found in {directory}. "
+                         "Pass the original EGOViewer recording directory (usually under recordings/); "
+                         "--output specifies where to save tracking results.")
+    if len(metadata_paths) > 1:
+        raise ValueError(f"Multiple meta_*.json files found in {directory}; pass one recording directory")
+    metadata = json.loads(metadata_paths[0].read_text())
     calibration_path = directory / metadata["files"]["calibration_camera"]
     calibration = yaml.safe_load(calibration_path.read_text())
     cameras = {}
@@ -571,6 +581,159 @@ def aggregate_tag_status(status):
     return overall, np.count_nonzero(status != "lost", axis=1)
 
 
+def estimate_tag_alignment(tag_results, reference_id=None, min_samples=3):
+    """Estimate fixed tag-to-reference transforms from simultaneous raw poses."""
+    tag_ids = list(tag_results)
+    reference_id = tag_ids[0] if reference_id is None else reference_id
+    if reference_id not in tag_results:
+        raise ValueError("The global reference ID must be one of the tracked IDs")
+    active = {tag_id for tag_id, rows in tag_results.items()
+              if any(row["status"] != "lost" for row in rows)}
+    edges = []
+    for first, second in itertools.combinations(tag_ids, 2):
+        pairs = [(a, b) for a, b in zip(tag_results[first], tag_results[second])
+                 if a["status"] == b["status"] == "measured"]
+        multiview = [(a, b) for a, b in pairs if min(a["n_views"], b["n_views"]) >= 2]
+        if len(multiview) >= min_samples:
+            pairs = multiview
+        if len(pairs) < min_samples:
+            continue
+        rotations = np.array([a["R"].T @ b["R"] for a, b in pairs])
+        translations = np.array([a["R"].T @ (b["t"] - a["t"]) for a, b in pairs])
+        inliers = np.ones(len(pairs), dtype=bool)
+        for _ in range(3):
+            center_R = Rotation.from_matrix(rotations[inliers]).mean()
+            center_t = np.median(translations[inliers], axis=0)
+            rotation_error = (center_R.inv() * Rotation.from_matrix(rotations)).magnitude()
+            translation_error = np.linalg.norm(translations - center_t, axis=1)
+            limits = []
+            for errors, floor in ((rotation_error, np.deg2rad(2)), (translation_error, .002)):
+                median = np.median(errors[inliers])
+                mad = np.median(np.abs(errors[inliers] - median))
+                limits.append(max(floor, median + 3 * 1.4826 * mad))
+            candidate = (rotation_error <= limits[0]) & (translation_error <= limits[1])
+            if np.count_nonzero(candidate) < min_samples or np.array_equal(candidate, inliers):
+                break
+            inliers = candidate
+        center_R = Rotation.from_matrix(rotations[inliers]).mean().as_matrix()
+        center_t = np.median(translations[inliers], axis=0)
+        errors_t = np.linalg.norm(translations[inliers] - center_t, axis=1)
+        errors_R = (Rotation.from_matrix(center_R).inv() * Rotation.from_matrix(rotations[inliers])).magnitude()
+        edges.append({"from_id": first, "to_id": second, "T_from_to": matrix(center_R, center_t).tolist(),
+                      "samples": len(pairs), "inliers": int(np.count_nonzero(inliers)),
+                      "translation_p95_mm": float(np.percentile(errors_t, 95) * 1000),
+                      "rotation_p95_deg": float(np.rad2deg(np.percentile(errors_R, 95)))})
+    transforms = {reference_id: np.eye(4)}
+    paths = {reference_id: [reference_id]}
+    while active - transforms.keys():
+        choices = [edge for edge in edges
+                   if (edge["from_id"] in transforms) != (edge["to_id"] in transforms)]
+        if not choices:
+            missing = sorted(active - transforms.keys())
+            raise ValueError(f"Cannot align tag IDs {missing} to ID {reference_id}: "
+                             f"need at least {min_samples} simultaneous measured poses connecting the IDs")
+        edge = max(choices, key=lambda item: item["inliers"])
+        first, second = edge["from_id"], edge["to_id"]
+        transform = np.array(edge["T_from_to"])
+        if first not in transforms:
+            first, second, transform = second, first, np.linalg.inv(transform)
+        transforms[second] = transforms[first] @ transform
+        paths[second] = paths[first] + [second]
+    return {"reference_tag_id": reference_id,
+            "assumption": "Tags remain fixed relative to one another; estimated from this recording, not a surveyed rig calibration.",
+            "transform_convention": "p_reference = T_reference_tag @ p_tag",
+            "T_reference_tag": {str(tag_id): transform.tolist() for tag_id, transform in transforms.items()},
+            "paths": {str(tag_id): path for tag_id, path in paths.items()},
+            "unobserved_tag_ids": sorted(set(tag_ids) - active), "edges": edges}
+
+
+def fuse_tag_results(tag_results, reference_id=None, cutoff=4.):
+    """Fuse available tag poses after converting each to the same tag frame."""
+    tag_ids = list(tag_results)
+    first_rows = tag_results[tag_ids[0]]
+    for rows in tag_results.values():
+        if [row["timestamp_us"] for row in rows] != [row["timestamp_us"] for row in first_rows]:
+            raise ValueError("Tag pose timestamps must match for global fusion")
+    alignment = estimate_tag_alignment(tag_results, reference_id)
+    inverses = {int(tag_id): np.linalg.inv(transform)
+                for tag_id, transform in alignment["T_reference_tag"].items()}
+    status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
+    overall, n_valid = aggregate_tag_status(status)
+    filter_state = AdaptiveFilter(cutoff)
+    results = []
+    for index, first in enumerate(first_rows):
+        result = {key: first[key] for key in ("frame", "timestamp_us", "time_s")}
+        result.update(status=str(overall[index]), n_valid_tags=int(n_valid[index]), source_tag_ids=[])
+        if result["status"] != "lost":
+            # Prefer current decoded poses; flow-only poses provide the fallback.
+            source_ids = [tag_id for tag_id in tag_ids
+                          if tag_results[tag_id][index]["status"] == result["status"]]
+            sources = [tag_results[tag_id][index] for tag_id in source_ids]
+            transforms = [matrix(row["R"], row["t"]) @ inverses[tag_id]
+                          for tag_id, row in zip(source_ids, sources)]
+            rotations = np.array([transform[:3, :3] for transform in transforms])
+            positions = np.array([transform[:3, 3] for transform in transforms])
+            weights = np.array([row["n_views"] / max(row["rms"], .5) ** 2 for row in sources])
+            distances = np.linalg.norm(positions[:, None] - positions[None, :], axis=2)
+            angles = np.array([(Rotation.from_matrix(R).inv() * Rotation.from_matrix(rotations)).magnitude()
+                               for R in rotations])
+            center = int(np.argmin((distances / .02 + angles / np.deg2rad(15)) @ weights))
+            keep = (distances[center] <= .02) & (angles[center] <= np.deg2rad(15))
+            R = Rotation.from_matrix(rotations[keep]).mean(weights=weights[keep]).as_matrix()
+            t = np.average(positions[keep], axis=0, weights=weights[keep])
+            filtered_R, filtered_t = filter_state.update(R, t, first["time_s"])
+            kept = [row for row, accepted in zip(sources, keep) if accepted]
+            result.update(R=R, t=t, filtered_R=filtered_R, filtered_t=filtered_t,
+                          source_tag_ids=[tag_id for tag_id, accepted in zip(source_ids, keep) if accepted],
+                          source_rms=float(np.sqrt(np.average([row["rms"] ** 2 for row in kept], weights=weights[keep]))),
+                          n_views=len({camera for row in kept for camera in row["cameras"]}))
+        results.append(result)
+    return results, alignment
+
+
+def export_global_results(output, results, alignment, tag_ids):
+    count = len(results)
+    raw = np.full((count, 4, 4), np.nan)
+    filtered = raw.copy()
+    source_mask = np.zeros((count, len(tag_ids)), dtype=bool)
+    columns = ["frame", "timestamp_us", "time_s", "status", "reference_tag_id", "n_valid_tags",
+               "n_views", "source_rms_px", "source_tag_ids"]
+    columns += [f"{prefix}_{axis}" for prefix in ("raw_t_m", "filtered_t_m") for axis in "xyz"]
+    columns += [f"{prefix}_{axis}" for prefix in ("raw_q", "filtered_q") for axis in ("x", "y", "z", "w")]
+    previous_quaternions = [None, None]
+    with (output / "global_poses.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(columns)
+        for index, result in enumerate(results):
+            sources = result["source_tag_ids"]
+            row = [result["frame"], result["timestamp_us"], result["time_s"], result["status"],
+                   alignment["reference_tag_id"], result["n_valid_tags"], result.get("n_views", 0),
+                   result.get("source_rms", np.nan), ";".join(map(str, sources))]
+            if result["status"] != "lost":
+                raw[index] = matrix(result["R"], result["t"])
+                filtered[index] = matrix(result["filtered_R"], result["filtered_t"])
+                source_mask[index] = [tag_id in sources for tag_id in tag_ids]
+                quaternions = []
+                for slot, key in enumerate(("R", "filtered_R")):
+                    q = Rotation.from_matrix(result[key]).as_quat()
+                    if previous_quaternions[slot] is not None and np.dot(q, previous_quaternions[slot]) < 0:
+                        q = -q
+                    previous_quaternions[slot] = q
+                    quaternions.extend(q)
+                row += [*result["t"], *result["filtered_t"], *quaternions]
+            else:
+                row += [np.nan] * 14
+            writer.writerow(row)
+    np.savez_compressed(output / "global_poses.npz", T_cam0_global_raw=raw,
+                        T_cam0_global_filtered=filtered, tag_ids=np.array(tag_ids, dtype=np.int64),
+                        reference_tag_id=alignment["reference_tag_id"], source_mask=source_mask,
+                        timestamp_us=np.array([row["timestamp_us"] for row in results]),
+                        status=np.array([row["status"] for row in results]))
+    (output / "tag_alignment.json").write_text(json.dumps(alignment, indent=2) + "\n")
+    return {"reference_tag_id": alignment["reference_tag_id"], "calibration": "tag_alignment.json",
+            "poses": "global_poses.npz", "assumption": alignment["assumption"]}
+
+
 def export_tag_results(output, outputs, summaries):
     """Combine the per-tag exports, keeping an explicit ID dimension/column."""
     tag_ids = list(outputs)
@@ -705,70 +868,85 @@ def draw_tracking_status(axis, times, tag_ids, status):
     axis.set_xlabel("Recording time (s)")
 
 
-def plot_tag_results(output, tag_results):
-    """Plot separate tag curves together, plus the OR of their valid states."""
+def draw_global_status(axis, times, status):
+    status = np.array(status)
+    values = (status != "lost").astype(float)
+    estimated = status == "interpolated"
+    values[estimated] = .5
+    axis.step(times, values, where="mid", color="#16815d", lw=1.4)
+    axis.set_yticks([0, .5, 1] if np.any(estimated) else [0, 1])
+    axis.set_yticklabels(["LOST", "ESTIMATED", "TRACKING"] if np.any(estimated) else ["LOST", "TRACKING"])
+    axis.set_ylim(-.15, 1.15)
+    axis.set_xlim(times[0], times[-1] if len(times) > 1 else times[0] + 1 / 30)
+    axis.set_xlabel("Recording time (s)")
+    axis.grid(alpha=.25)
+
+
+def plot_tag_results(output, tag_results, global_results=None, reference_id=None):
+    """Draw one unified, filtered pose curve per component in the overview."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     tag_ids = list(tag_results)
-    times = np.array([row["time_s"] for row in tag_results[tag_ids[0]]])
+    reference_id = tag_ids[0] if reference_id is None else reference_id
+    if global_results is None:
+        global_results, _ = fuse_tag_results(tag_results, reference_id)
+    times = np.array([row["time_s"] for row in global_results])
     status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
-    colors = [plt.get_cmap("tab10")(index % 10) for index in range(len(tag_ids))]
+    overall = [row["status"] for row in global_results]
+    positions = np.array([row.get("filtered_t", [np.nan] * 3) for row in global_results])
+    estimated = np.array(overall) == "interpolated"
     figure, axes = plt.subplots(5, 1, figsize=(14, 12), sharex=True, constrained_layout=True,
-                                gridspec_kw={"height_ratios": [1, 1, 1, .8, 1.1]})
-    for tag_id, color in zip(tag_ids, colors):
-        results = tag_results[tag_id]
-        for key, alpha, width in (("t", .25, .8), ("filtered_t", 1., 1.2)):
-            positions = np.array([row.get(key, [np.nan] * 3) for row in results])
-            for dimension, axis in enumerate(axes[:3]):
-                axis.plot(times, positions[:, dimension], color=color, alpha=alpha, lw=width,
-                          label=f"ID {tag_id}" if key == "filtered_t" else None)
-        axes[3].plot(times, [row.get("rms", np.nan) for row in results], color=color, lw=.9)
+                                gridspec_kw={"height_ratios": [1, 1, 1, .8, .6]})
     for dimension, axis in enumerate(axes[:3]):
+        axis.plot(times, positions[:, dimension], color="#2878b5", lw=1.2)
+        if np.any(estimated):
+            axis.scatter(times[estimated], positions[estimated, dimension], color="#de8f05", s=18, zorder=3)
         axis.set_ylabel(f"{'XYZ'[dimension]} (m)")
         axis.grid(alpha=.25)
-    axes[0].legend(loc="upper right", ncol=len(tag_ids))
-    axes[3].set_ylabel("reproj RMS (px)")
+    axes[3].plot(times, [row.get("source_rms", np.nan) for row in global_results], color="#2878b5", lw=.9)
+    axes[3].set_ylabel("source RMS (px)")
     axes[3].grid(alpha=.25)
-    draw_tracking_status(axes[4], times, tag_ids, status)
-    figure.suptitle("All tags in cam_0: position overview (solid: filtered, faint: raw)")
+    draw_global_status(axes[4], times, overall)
+    note = " | Orange points: interpolated estimates" if np.any(estimated) else ""
+    figure.suptitle(f"Unified position in cam_0: reference tag ID {reference_id} (filtered){note}")
     figure.savefig(output / "trajectory.png", dpi=150)
     plt.close(figure)
 
     figure, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True, constrained_layout=True,
-                                gridspec_kw={"height_ratios": [1, 1, 1, 1.1]})
-    for tag_id, color in zip(tag_ids, colors):
-        results = tag_results[tag_id]
-        valid = [row for row in results if row["status"] != "lost"]
-        if not valid:
-            axes[0].plot([], [], color=color, label=f"ID {tag_id} (no valid pose)")
-            continue
-        initial = valid[0]["R"]
-        for key, alpha, width in (("R", .25, .8), ("filtered_R", 1., 1.2)):
-            vectors = np.array([
-                np.rad2deg(Rotation.from_matrix(initial.T @ row[key]).as_rotvec())
-                if row["status"] != "lost" else [np.nan] * 3 for row in results
-            ])
-            for dimension, axis in enumerate(axes[:3]):
-                axis.plot(times, vectors[:, dimension], color=color, alpha=alpha, lw=width,
-                          label=f"ID {tag_id}" if key == "filtered_R" else None)
+                                gridspec_kw={"height_ratios": [1, 1, 1, .6]})
+    valid = [row for row in global_results if row["status"] != "lost"]
+    initial = valid[0]["filtered_R"] if valid else np.eye(3)
+    vectors = np.array([
+        np.rad2deg(Rotation.from_matrix(initial.T @ row["filtered_R"]).as_rotvec())
+        if row["status"] != "lost" else [np.nan] * 3 for row in global_results
+    ])
     for dimension, axis in enumerate(axes[:3]):
+        axis.plot(times, vectors[:, dimension], color="#2878b5", lw=1.2)
+        if np.any(estimated):
+            axis.scatter(times[estimated], vectors[estimated, dimension], color="#de8f05", s=18, zorder=3)
         axis.set_ylabel(f"rotvec {'XYZ'[dimension]} (deg)")
         axis.grid(alpha=.25)
-    axes[0].legend(loc="upper right", ncol=len(tag_ids))
-    draw_tracking_status(axes[3], times, tag_ids, status)
-    figure.suptitle("Orientation overview: each ID relative to its own first valid orientation\n"
-                    "Solid: filtered | Faint: raw | Separate tag frames")
+    draw_global_status(axes[3], times, overall)
+    figure.suptitle(f"Unified orientation: reference tag ID {reference_id}, relative to first valid pose (filtered){note}")
     figure.savefig(output / "orientation.png", dpi=150)
     plt.close(figure)
 
+    figure, axis = plt.subplots(figsize=(14, 2.5), constrained_layout=True)
+    draw_global_status(axis, times, overall)
+    overall = np.array(overall)
+    valid_count = int(np.count_nonzero(overall != "lost"))
+    if np.any(estimated):
+        figure.suptitle(f"Completed poses: {valid_count}/{len(times)} | Image-supported: {valid_count - int(estimated.sum())}"
+                        f" | Interpolated estimates: {int(estimated.sum())}")
+    else:
+        figure.suptitle(f"Overall tracking: {valid_count}/{len(times)} valid frames ({valid_count / len(times):.1%})")
+    figure.savefig(output / "tracking_status.png", dpi=150)
+    plt.close(figure)
     figure, axis = plt.subplots(figsize=(14, 3), constrained_layout=True)
     draw_tracking_status(axis, times, tag_ids, status)
-    overall, _ = aggregate_tag_status(status)
-    valid_count = int(np.count_nonzero(overall != "lost"))
-    figure.suptitle(f"Overall tracking: {valid_count}/{len(times)} valid frames ({valid_count / len(times):.1%})")
-    figure.savefig(output / "tracking_status.png", dpi=150)
+    figure.savefig(output / "tracking_status_by_id.png", dpi=150)
     plt.close(figure)
 
 
@@ -884,13 +1062,15 @@ def render_video(directory, output, metadata, cameras, frames, results, args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("recording", type=Path)
+    parser.add_argument("recording", type=Path,
+                        help="Original EGOViewer recording directory containing meta_*.json")
     parser.add_argument("--tagsize", type=float, required=True, help="Detection-square side in meters")
     parser.add_argument("--family", default="tag36h11")
     tags = parser.add_mutually_exclusive_group()
     tags.add_argument("--tag-id", type=int, help="Track one ID (default: 0)")
     tags.add_argument("--tag-ids", type=int, nargs="+", help="Track multiple IDs, e.g. --tag-ids 0 1 2")
-    parser.add_argument("--output", type=Path, default=ROOT / "outputs/ego_multicam")
+    parser.add_argument("--output", type=Path, default=ROOT / "outputs/ego_multicam",
+                        help="Directory for generated tracking results")
     parser.add_argument("--max-frames", type=int, default=0, help="0 processes the entire recording")
     parser.add_argument("--max-sync-us", type=int, default=1000)
     parser.add_argument("--max-reprojection", type=float, default=2.5)
@@ -917,12 +1097,15 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     tag_ids = args.tag_ids if args.tag_ids is not None else [args.tag_id]
+    try:
+        metadata, cameras, timestamps = load_recording(args.recording)
+    except (ValueError, OSError) as error:
+        raise SystemExit(f"error: {error}") from None
     args.output.mkdir(parents=True, exist_ok=True)
     outputs = {tag_id: args.output / f"tag_{tag_id}" if len(tag_ids) > 1 else args.output
                for tag_id in tag_ids}
     for output in outputs.values():
         output.mkdir(parents=True, exist_ok=True)
-    metadata, cameras, timestamps = load_recording(args.recording)
     started = time.monotonic()
     observations = collect_tag_observations(args.recording, outputs, metadata, cameras, timestamps, args)
     limit = min(len(timestamps["cam_0"]), args.max_frames or len(timestamps["cam_0"]))
@@ -937,7 +1120,10 @@ def main(argv=None):
         plot_results(output, results[tag_id], tag_id=tag_id)
     summary = export_tag_results(args.output, outputs, summaries) if len(tag_ids) > 1 else summaries[tag_ids[0]]
     if len(tag_ids) > 1:
-        plot_tag_results(args.output, results)
+        global_results, alignment = fuse_tag_results(results, cutoff=args.cutoff)
+        summary["global_pose"] = export_global_results(args.output, global_results, alignment, tag_ids)
+        (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        plot_tag_results(args.output, results, global_results, alignment["reference_tag_id"])
     if not args.no_video:
         render_tag_video(args.recording, args.output, metadata, cameras, frames, results, args)
     report = {"frames": summary["frames"], "elapsed_s": round(time.monotonic() - started, 1),

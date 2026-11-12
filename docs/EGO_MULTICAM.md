@@ -59,6 +59,10 @@ EGO KB 鱼眼录制应使用下面的四相机脚本。
 ## 跟踪 EGOViewer 录制
 
 输入目录应包含 `meta_*.json`、四路视频与时间戳 CSV，以及 `calibration_camera.yaml`。
+脚本的第一个路径是原始录制目录，`--output` 后的路径是结果目录。
+例如录制 `recordings/EGO-4B_AZLCA610091_20261027_190651` 可以输出到
+`outputs/EGO-4B_AZLCA610091_20261027_190651_0.03`；`_0.03` 是结果目录的自定义后缀，
+30 mm 的实际边长由 `--tagsize 0.030` 设置。输出目录不能替代原始录制目录作为输入。
 
 ```bash
 python3 scripts/track_ego_apriltag.py /path/to/EGO_recording \
@@ -80,10 +84,26 @@ python3 scripts/track_ego_apriltag.py \
 标签不可见时，该 ID 独立标记为 `lost`，其余标签继续跟踪。`--tagsize 0.040` 表示每个码的检测边长为 40 mm。
 
 多码输出目录中，`tag_0/`、`tag_1/`、`tag_2/` 分别保存与单码相同的位姿、统计、轨迹图和检测缓存。
+每个子目录里的 `trajectory.png` 和 `orientation.png` 是该 ID 的单独图。
+根目录的同名 `trajectory.png`、`orientation.png` 是统一位姿总览，每个分量只画一条平滑曲线。
+统一参考为 `--tag-ids` 中的第一个 ID，本例为 ID 0 的中心和坐标轴；位置表达在 cam_0 坐标系，
+朝向相对统一位姿的第一帧有效朝向。脚本从同时获得有效解码位姿的帧中稳健估计码间固定变换，
+优先使用多相机观测并通过共同可见的 ID 连接各码，再把可用位姿换算到统一参考系后融合、统一滤波。
+ID 0 不可见时，可以由 ID 1 或 2 估计同一个 ID 0 参考坐标系的位姿。
+这按三个码相对固定来估计；腕带变形会影响统一位姿精度，码间关系应有足够的共同观测支持。
+根目录 `tracking_status.png` 也是一条整体跟踪状态曲线；
+`tracking_status_by_id.png` 另外保留各 ID 与 `GLOBAL` 的状态对照。
 根目录的 `tracking_preview.mp4` 同时标注各 ID 和坐标轴，`summary.json` 汇总各码质量与覆盖率；
-根目录 `poses.csv` 每帧每码一行，并增加 `tag_id` 列，包含丢失状态。
+视频单独显示 `GLOBAL: TRACKING/LOST`：至少一个码通过现有重投影误差、运动突跳等位姿检查时，整体有效；
+仅当所有码都丢失时，整体才是 `lost`。存在解码位姿时整体为 `measured`，否则有有效光流位姿时为 `flow_only`。
+根目录 `poses.csv` 每帧每码一行，增加 `tag_id` 和 `global_status` 列；`status` 保留该码自己的状态。
+根目录 `global_tracking.csv` 每帧一行，记录整体状态、有效码数量和 `active_tag_ids`；
+`summary.json` 的 `valid_frames`、`lost_frames`、`coverage_percent` 也按上述整体规则统计。
+`global_poses.csv` 和 `global_poses.npz` 保存每帧一份的统一位姿，包含实际参与融合的来源 ID；
+`global_poses.npz` 中 `T_cam0_global_raw`、`T_cam0_global_filtered` 的形状均为 `(帧数, 4, 4)`。
+`tag_alignment.json` 保存参考 ID、估计的码间变换、共同观测数量和对齐残差。
 根目录 `poses.npz` 的变换数组形状为 `(帧数, 标签数, 4, 4)`，`status` 为 `(帧数, 标签数)`，
-第二维的顺序由 `tag_ids` 数组指定：
+`global_status` 和 `n_valid_tags` 为 `(帧数,)`；第二维的顺序由 `tag_ids` 数组指定：
 
 ```python
 import numpy as np
@@ -91,7 +111,63 @@ import numpy as np
 result = np.load("outputs/ego_20261027_182506/poses.npz")
 slot = np.flatnonzero(result["tag_ids"] == 2)[0]
 T_cam0_tag2 = result["T_cam0_tag_raw"][:, slot]
+overall_valid = result["global_status"] != "lost"
+
+global_result = np.load("outputs/ego_20261027_182506/global_poses.npz")
+T_cam0_global = global_result["T_cam0_global_filtered"]
 ```
+
+上述图片在处理录制时自动生成。已有检测缓存时，只想重新生成图表和统计，可运行：
+
+```bash
+python3 scripts/track_ego_apriltag.py \
+  recordings/EGO-4B_AZLCA610091_20261027_182506 \
+  --family tag36h11 --tag-ids 0 1 2 --tagsize 0.040 \
+  --output outputs/ego_20261027_182506 --reuse-detections --no-video
+```
+
+## 离线恢复短暂丢帧
+
+已有多码跟踪结果时，可以从前后清晰帧重新解码、双向跟踪，恢复快速运动时单向跟踪漏掉的帧：
+
+```bash
+python3 scripts/recover_ego_apriltag.py \
+  outputs/EGO-4B_AZLCA610091_20261027_190651_0.03
+```
+
+这个恢复脚本的输入是**结果目录**，它从 `summary.json` 读取原始录制路径；原始跟踪命令的输入仍为录制目录。
+默认输出到同级的 `EGO-4B_AZLCA610091_20261027_190651_0.03_recovered/`，保留原始结果。
+恢复时重检原始丢帧和孤立单码位置尖峰附近的短窗口，保留同一 ID 的多个候选，使用已估计的腕带布局和多相机重投影选择目标，
+从两端清晰图像做光流跟踪，每个相邻图像对保留正反向光流检查；仅光流支持时至少需要两路相机一致。
+快速转头时，不仅依赖直线位姿预测来判断已有观测是否正确。
+
+剩余缺口默认最多补 3 帧，且两端有效位姿间隔不超过 0.15 秒，采用位置线性插值和旋转 SLERP。
+长缺口、序列首尾以及运动跳变过大的缺口不补；`--max-gap-frames 0` 可禁用插值。
+有图像支撑的两端之间，少数孤立、未能再次从图像确认的大幅跳变也会作为短缺口处理。
+`global_poses.csv` 和 `.npz` 保留 `original_status`、`pose_source`，区分：
+
+- `redetected`：当前帧重新解码并通过几何检查。
+- `flow_recovered`：前后图像跟踪并通过多相机几何检查，`status=flow_only`。
+- `interpolated`：两端约束下的估计，`status=interpolated`；没有当前帧视觉测量。
+- `original` / `original_unverified`：沿用原始结果，后者表示恢复窗口内未重新确认的观测。
+
+恢复目录的轨迹和朝向图以橙色点标出插值帧，状态图单列 `ESTIMATED`，
+`summary.json` 分别统计图像支撑、插值和仍然丢失的帧。需要纯视觉结果时只选
+`status` 为 `measured` 或 `flow_only` 的行。恢复仍依赖码间相对固定的假设，不能把长时遮挡或完全模糊的图像恢复成真实测量。
+图像中的背景同 ID 标签也会造成误跟踪，录制时宜遮住不属于目标腕带的重复标签。
+
+恢复完成后，可以直接用保存的位姿生成视频，无需重新检测：
+
+```bash
+python3 scripts/render_ego_recovery.py \
+  outputs/EGO-4B_AZLCA610091_20261027_190651_0.03_recovered
+```
+
+输出四路拼接的 `tracking_preview.mp4` 和 `camera_previews/cam_0.mp4` 至 `cam_3.mp4`，
+均为 H.264 视频，需要系统安装带 libx264 的 FFmpeg。坐标轴由当前帧的整体位姿和固定码布局投影，
+画面中的 `image IDs` 单列当前提供图像支持的 ID，插值帧显示 `ESTIMATED` 和橙色边框。
+
+## 跟踪选项
 
 常用选项：
 
@@ -158,7 +234,8 @@ python3 -m unittest discover -s test -p test_ego_multicam.py -v
 ```
 
 测试覆盖 KB 投影与反解、相机外参和三角测量尺度、异常相机剔除、时间戳关联、光流位姿门限，
-以及多码共享检测、ID 隔离、缓存复用和多码位姿导出。
+以及多码共享检测、ID 隔离、缓存复用、多码位姿导出、整体任一码有效的状态规则，
+以及码间变换、跨 ID 连续的统一参考位姿、异常位姿剔除和统一位姿导出。
 
 ## 同步官方更新
 
