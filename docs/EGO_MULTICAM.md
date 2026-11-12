@@ -229,13 +229,30 @@ t = T[:3, 3]  # 米
 
 ## 验证
 
+先按安装章节编译 Python 绑定。EGO 回归测试使用合成观测和临时目录，不需要本机录制或已有 `outputs/`：
+
 ```bash
-python3 -m unittest discover -s test -p test_ego_multicam.py -v
+/usr/bin/python3 -m unittest discover -s test -p 'test_ego*.py' -v
 ```
 
 测试覆盖 KB 投影与反解、相机外参和三角测量尺度、异常相机剔除、时间戳关联、光流位姿门限，
 以及多码共享检测、ID 隔离、缓存复用、多码位姿导出、整体任一码有效的状态规则，
 以及码间变换、跨 ID 连续的统一参考位姿、异常位姿剔除和统一位姿导出。
+恢复测试还覆盖重复 ID 的目标选择、多相机光流约束、短缺口插值，以及长缺口和异常突跳的处理。
+
+官方 C 检测、位姿与快速解码测试保留在 `test/`，使用独立编译目录运行：
+
+```bash
+cmake -S . -B build/validation \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  -DBUILD_EXAMPLES=ON -DBUILD_PYTHON_WRAPPER=ON \
+  -DPython3_EXECUTABLE=/usr/bin/python3
+cmake --build build/validation --parallel 4
+ctest --test-dir build/validation --output-on-failure
+```
+
+`tag_family_examples/` 的图片、尺寸图和 `families.json` 是可复用资源，保留在 Git 中。
+一次性的 `verification.json` 校验报告、`outputs/`、录制和编译缓存属于本地产物，不纳入 Git。
 
 ## 同步官方更新
 

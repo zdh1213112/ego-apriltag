@@ -9,6 +9,7 @@ build/
 # Python caches and local environments
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
 venv/
 
@@ -16,6 +17,13 @@ venv/
 /outputs/
 /recordings/
 /output/
+
+# One-off validation report; keep reusable tag images and families.json tracked.
+/tag_family_examples/verification.json
+
+# Local agent settings
+/.agents/
+/.codex/
 
 # Local credentials
 /.aws

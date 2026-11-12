@@ -433,7 +433,7 @@ class AdaptiveFilter:
 
 def associate_frames(observations, timestamps, max_sync_us, limit):
     frames = []
-    for index, timestamp in enumerate(timestamps["cam_0"][:limit]):
+    for timestamp in timestamps["cam_0"][:limit]:
         matched = []
         for camera_id, camera_times in timestamps.items():
             insertion = int(np.searchsorted(camera_times, timestamp))
