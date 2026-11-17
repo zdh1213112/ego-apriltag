@@ -5,6 +5,7 @@ import argparse
 from contextlib import contextmanager
 import csv
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import cv2
 import numpy as np
 
 from track_ego_apriltag import STREAMS, draw_tag_overlay, load_recording, object_points, project_pose
+from ego_trails import ReferenceTrail
 
 
 @contextmanager
@@ -80,7 +82,8 @@ def draw_recovered_frame(image, camera, row, pose, transforms, size):
     return image
 
 
-def render(results, width=960):
+def render(results, width=960, trail_seconds=0., output=None):
+    results = Path(results)
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg with libx264 is required to export H.264 previews")
     report = json.loads((results / "summary.json").read_text())
@@ -98,9 +101,24 @@ def render(results, width=960):
             raise ValueError("Recovered CSV and NPZ frame counts differ")
         if not np.array_equal(payload["timestamp_us"], timestamps["cam_0"][:len(rows)]):
             raise ValueError("Recovered poses and recording timestamps differ")
+        trail = ReferenceTrail(poses, payload["timestamp_us"], payload["status"],
+                               alignment["reference_tag_id"], trail_seconds) if trail_seconds > 0 else None
+    output = results if output is None else Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    if trail is not None:
+        trail.export(output / "reference_trail.csv")
+    output = results if output is None else Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    if trail is not None:
+        trail.export(output / "reference_trail.csv")
+    (output / "render_settings.json").write_text(json.dumps({
+        "results": str(results.resolve()), "reference_tag_id": alignment["reference_tag_id"],
+        "trail_seconds": trail_seconds, "trail_coordinate_frame": "cam_0", "trail_pose": "raw",
+        "estimated_trail_color": "orange", "visual_trail_color": "cyan",
+    }, indent=2) + "\n")
     fps = 1e6 / float(np.median(np.diff(timestamps["cam_0"])))
     height = round(width * cameras["cam_0"].height / cameras["cam_0"].width / 2) * 2
-    previews = results / "camera_previews"
+    previews = output / "camera_previews"
     previews.mkdir(exist_ok=True)
     samples = {0, len(rows) - 1} | {index for index, row in enumerate(rows) if row["status"] == "interpolated"}
     for camera_id, stream in STREAMS.items():
@@ -112,6 +130,8 @@ def render(results, width=960):
                     if not ok:
                         raise RuntimeError(f"Recording ended early: {camera_id}/{index}")
                     image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+                    if trail is not None:
+                        trail.draw(image, cameras[camera_id], index)
                     image = draw_recovered_frame(image, cameras[camera_id], row, poses[index],
                                                   transforms, summary["tagsize_m"])
                     sink.write(image.tobytes())
@@ -120,7 +140,7 @@ def render(results, width=960):
         print(f"Rendered {camera_id}: {len(rows)} frames", flush=True)
     captures = {key: cv2.VideoCapture(str(previews / f"{key}.mp4")) for key in STREAMS}
     try:
-        with h264_writer(results / "tracking_preview.mp4", width * 2, height * 2, fps) as sink:
+        with h264_writer(output / "tracking_preview.mp4", width * 2, height * 2, fps) as sink:
             for index in range(len(rows)):
                 images = {}
                 for key, capture in captures.items():
@@ -132,18 +152,22 @@ def render(results, width=960):
                                     np.hstack((images["cam_3"], images["cam_2"]))))
                 sink.write(mosaic.tobytes())
                 if index in samples:
-                    cv2.imwrite(str(results / f"recovered_frame_{index:04d}.jpg"), mosaic)
+                    cv2.imwrite(str(output / f"recovered_frame_{index:04d}.jpg"), mosaic)
     finally:
         for capture in captures.values():
             capture.release()
-    print(f"Saved {results / 'tracking_preview.mp4'}", flush=True)
+    print(f"Saved {output / 'tracking_preview.mp4'}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path, help="Recovered results directory")
+    parser.add_argument("--trail-seconds", type=float, default=0., help="Reference tag motion trail duration; 0 disables")
+    parser.add_argument("--output", type=Path, help="Video output directory; pose results are read from the input")
     args = parser.parse_args()
-    render(args.results)
+    if not math.isfinite(args.trail_seconds) or args.trail_seconds < 0:
+        parser.error("trail-seconds must be a nonnegative finite number")
+    render(args.results, trail_seconds=args.trail_seconds, output=args.output)
 
 
 if __name__ == "__main__":

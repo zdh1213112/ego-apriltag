@@ -19,6 +19,8 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 import yaml
+from ego_trails import ReferenceTrail
+from ego_detector import create_detector, detection_cache_settings
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -188,12 +190,77 @@ def pose_residual(parameters, observations, cameras, points, weighted=True):
     return np.asarray(residuals)
 
 
+class PoseProjectionProblem:
+    """Batched KB residuals and analytic pose derivatives for fixed observations."""
+    def __init__(self, observations, cameras, points, weighted=True):
+        views = [cameras[row["camera"]] for row in observations]
+        self.camera_R = np.array([camera.R for camera in views])
+        self.camera_t = np.array([camera.t for camera in views])
+        self.focal = np.array([[camera.K[0, 0], camera.K[1, 1]] for camera in views])
+        self.center = np.array([camera.K[:2, 2] for camera in views])
+        self.distortion = np.array([camera.D for camera in views])
+        self.points = np.array([points[row["tag_id"]] if isinstance(points, dict) else points
+                                for row in observations])
+        self.corners = np.array([row["corners"] for row in observations])
+        self.weights = np.array([.45 if weighted and row["source"] == "flow" else 1.
+                                 for row in observations])[:, None, None]
+        self.parameters = None
+
+    def evaluate(self, parameters):
+        if self.parameters is not None and np.array_equal(self.parameters, parameters):
+            return
+        self.parameters = np.array(parameters, copy=True)
+        R, self.rotation_derivative = cv2.Rodrigues(parameters[:3])
+        world = self.points @ R.T + parameters[3:]
+        xyz = np.einsum("vki,vji->vkj", world, self.camera_R) + self.camera_t[:, None, :]
+        x, y, z = np.moveaxis(xyz, -1, 0)
+        rho2 = x * x + y * y
+        rho = np.sqrt(rho2)
+        theta = np.arctan2(rho, z)
+        theta_d, derivative = theta.copy(), np.ones_like(theta)
+        for index in range(self.distortion.shape[1]):
+            power = 2 * index + 3
+            coefficient = self.distortion[:, index, None]
+            theta_d += coefficient * theta ** power
+            derivative += power * coefficient * theta ** (power - 1)
+        scale = np.divide(theta_d, rho, out=np.zeros_like(rho), where=rho > 1e-12)
+        # Use the continuous forward-axis limit for derivatives at rho == 0.
+        axial = (rho <= 1e-12) & (z > 1e-12)
+        np.divide(1., z, out=scale, where=axial)
+        self.predicted = xyz[..., :2] * scale[..., None] * self.focal[:, None, :] + self.center[:, None, :]
+        self.geometry = x, y, z, rho2, np.maximum(rho2 + z * z, 1e-24), scale, derivative
+
+    def residual(self, parameters, weighted=True):
+        self.evaluate(parameters)
+        difference = self.predicted - self.corners
+        return (difference * self.weights if weighted else difference).ravel()
+
+    def jacobian(self, parameters):
+        self.evaluate(parameters)
+        x, y, z, rho2, norm2, scale, derivative = self.geometry
+        common = np.divide(derivative * z / norm2 - scale, rho2,
+                           out=np.zeros_like(rho2), where=rho2 > 1e-20)
+        dz = -derivative / norm2
+        projection = np.stack((
+            np.stack((scale + common * x * x, common * x * y, dz * x), axis=-1),
+            np.stack((common * x * y, scale + common * y * y, dz * y), axis=-1),
+        ), axis=-2) * self.focal[:, None, :, None]
+        dR = self.rotation_derivative.reshape(3, 3, 3)
+        d_world = np.einsum("pij,vkj->vkip", dR, self.points)
+        d_camera = np.einsum("vij,vkjp->vkip", self.camera_R, d_world)
+        d_translation = np.broadcast_to(self.camera_R[:, None], d_camera.shape)
+        pose_derivative = np.concatenate((d_camera, d_translation), axis=-1)
+        jac = np.einsum("vkai,vkip->vkap", projection, pose_derivative)
+        return (jac * self.weights[..., None]).reshape(-1, 6)
+
+
 def fit_pose(observations, cameras, size, previous=None, max_error=2.5):
     if not observations:
         return None
     if len({o["tag_id"] for o in observations if "tag_id" in o}) > 1:
         raise ValueError("A pose fit must contain observations of only one tag ID")
     points = object_points(size)
+    problem = PoseProjectionProblem(observations, cameras, points)
     candidates = []
     edge_sizes = []
     for pair in itertools.combinations(observations, 2):
@@ -214,7 +281,7 @@ def fit_pose(observations, cameras, size, previous=None, max_error=2.5):
         if not np.all(np.isfinite(t)) or not 0.03 < np.linalg.norm(t) < 20:
             continue
         parameters = np.r_[Rotation.from_matrix(R).as_rotvec(), t]
-        residual = pose_residual(parameters, observations, cameras, points, weighted=False).reshape(-1, 4, 2)
+        residual = problem.residual(parameters, weighted=False).reshape(-1, 4, 2)
         camera_errors = np.sqrt(np.mean(residual ** 2, axis=(1, 2)))
         # Median over views prevents a single mis-tracked camera dominating initialization.
         score = np.median(camera_errors) + 0.1 * np.mean(np.minimum(camera_errors, 20))
@@ -228,19 +295,20 @@ def fit_pose(observations, cameras, size, previous=None, max_error=2.5):
     kept = list(observations)
     for _ in range(len(observations) + 1):
         result = least_squares(
-            pose_residual, parameters, args=(kept, cameras, points), loss="soft_l1",
+            problem.residual, parameters, jac=problem.jacobian, loss="soft_l1",
             f_scale=0.8, max_nfev=60, xtol=1e-7, ftol=1e-7, gtol=1e-7,
             x_scale=np.array([1., 1., 1., 0.2, 0.2, 0.2]),
         )
         parameters = result.x
-        residual = pose_residual(parameters, kept, cameras, points, weighted=False).reshape(-1, 4, 2)
+        residual = problem.residual(parameters, weighted=False).reshape(-1, 4, 2)
         errors = np.sqrt(np.mean(residual ** 2, axis=(1, 2)))
         worst = int(np.argmax(errors))
         if len(kept) > 1 and errors[worst] > max_error:
             kept.pop(worst)
+            problem = PoseProjectionProblem(kept, cameras, points)
             continue
         break
-    rms = float(np.sqrt(np.mean(pose_residual(parameters, kept, cameras, points, weighted=False) ** 2)))
+    rms = float(np.sqrt(np.mean(problem.residual(parameters, weighted=False) ** 2)))
     if rms > max_error or not np.all(np.isfinite(parameters)):
         return None
     R = Rotation.from_rotvec(parameters[:3]).as_matrix()
@@ -255,6 +323,85 @@ def fit_pose(observations, cameras, size, previous=None, max_error=2.5):
             "triangulated_edges_m": edge_sizes}
 
 
+def fit_rigid_detections(detections, cameras, points, size, alignment, prior=None, max_error=3.,
+                         allow_single_view=False, max_hypotheses=6):
+    """Choose among duplicate IDs using a common multi-tag, multi-camera pose."""
+    if not detections:
+        return None
+    groups = {}
+    hypotheses = [] if prior is None else [prior]
+    inverses = {int(key): np.linalg.inv(value) for key, value in alignment["T_reference_tag"].items()}
+    for observation in detections:
+        key = (observation["camera"], observation["tag_id"])
+        groups.setdefault(key, []).append(observation)
+        for R, t in monocular_candidates(observation, cameras[key[0]], object_points(size)):
+            if np.isfinite(t).all() and .03 < np.linalg.norm(t) < 20:
+                hypotheses.append(matrix(R, t) @ inverses[key[1]])
+
+    def assignments(T, threshold):
+        found, errors = [], []
+        for (camera_id, tag_id), choices in groups.items():
+            predicted = project_pose(cameras[camera_id], T[:3, :3], T[:3, 3], points[tag_id])
+            values = [float(np.sqrt(np.mean((predicted - row["corners"]) ** 2))) for row in choices]
+            best = int(np.argmin(values))
+            decoded_choices = [i for i, row in enumerate(choices)
+                               if row["source"] in ("decoded", "rectified") and values[i] <= values[best] + .5]
+            if decoded_choices:
+                best = min(decoded_choices, key=lambda index: values[index])
+            if values[best] <= threshold:
+                found.append(choices[best])
+                errors.append(values[best])
+        if prior is not None:
+            distant = (np.linalg.norm(T[:3, 3] - prior[:3, 3]) > .25
+                       or Rotation.from_matrix(prior[:3, :3].T @ T[:3, :3]).magnitude() > np.deg2rad(60))
+            tracked_cameras = {row["camera"] for row in found if row["source"] in ("backward_flow", "forward_flow")}
+            if distant and len(tracked_cameras) < 2:
+                return [], []
+        return found, errors
+
+    def score(found, errors):
+        return (len({row["tag_id"] for row in found}), len(found), -float(np.mean(errors))) if found else (0, 0, -np.inf)
+
+    ranked = []
+    for T in hypotheses:
+        found, errors = assignments(T, max_error * 2)
+        if found:
+            ranked.append((score(found, errors), T, found))
+    best = None
+    for _, T, found in sorted(ranked, key=lambda item: item[0], reverse=True)[:max_hypotheses]:
+        parameters = np.r_[Rotation.from_matrix(T[:3, :3]).as_rotvec(), T[:3, 3]]
+
+        for _ in range(2):
+            problem = PoseProjectionProblem(found, cameras, points, weighted=False)
+            fitted = least_squares(problem.residual, parameters, jac=problem.jacobian,
+                                    loss="soft_l1", f_scale=.8, max_nfev=50)
+            parameters = fitted.x
+            T = matrix(Rotation.from_rotvec(parameters[:3]).as_matrix(), parameters[3:])
+            found, errors = assignments(T, max_error)
+            if not found:
+                break
+        ids = sorted({row["tag_id"] for row in found})
+        camera_ids = {row["camera"] for row in found}
+        decoded = any(row["source"] in ("decoded", "rectified") for row in found)
+        tracked_cameras = {row["camera"] for row in found if row["source"] in ("backward_flow", "forward_flow")}
+        if not decoded and len(camera_ids) < 2:
+            continue
+        # A single ID is usable only with multi-view agreement and a nearby anchor prediction.
+        if not found or (len(ids) < 2 and (prior is None or (len(camera_ids) < 2 and not allow_single_view))):
+            continue
+        if len(ids) == 1 and decoded and len(tracked_cameras) < 2 and (np.linalg.norm(T[:3, 3] - prior[:3, 3]) > .10
+                             or Rotation.from_matrix(prior[:3, :3].T @ T[:3, :3]).magnitude() > np.deg2rad(25)):
+            continue
+        current = score(found, errors)
+        if best is None or current > best[0]:
+            best = (current, {"R": T[:3, :3], "t": T[:3, 3], "source_tag_ids": ids,
+                              "n_views": len(camera_ids), "n_valid_tags": len(ids),
+                              "source_rms": float(np.sqrt(np.mean(np.square(errors)))),
+                              "status": "measured" if decoded else "flow_only",
+                              "observations": found})
+    return None if best is None else best[1]
+
+
 def local_detection(gray, camera, last_corners, detector, tag_id):
     direction = camera.unproject(last_corners).mean(0)
     virtual_R = look_at(direction)
@@ -264,7 +411,8 @@ def local_detection(gray, camera, last_corners, detector, tag_id):
     raw_pixels = camera.project(rays @ virtual_R)
     virtual = cv2.remap(gray, raw_pixels[..., 0].astype(np.float32),
                         raw_pixels[..., 1].astype(np.float32), cv2.INTER_LINEAR)
-    choices = [d for d in detector.detect(virtual) if d["id"] == tag_id and d["margin"] >= 25]
+    detect = getattr(detector, "detect_local", detector.detect)
+    choices = [d for d in detect(virtual) if d["id"] == tag_id and d["margin"] >= 25]
     if len(choices) != 1:
         return None
     detection = choices[0]
@@ -335,24 +483,32 @@ def track_tag(gray, previous_gray, camera, detections, detector, tag_id, state, 
     return observation
 
 
-def collect_tag_observations(directory, outputs, metadata, cameras, timestamps, args):
+def collect_tag_observations(directory, outputs, metadata, cameras, timestamps, args,
+                             candidate_observations=None):
     """Decode each video frame once, with separate tracking state/cache per ID."""
-    from apriltag import apriltag
-
-    detector = apriltag(args.family, threads=2, maxhamming=1, decimate=1., refine_edges=True)
+    device = getattr(args, "device", "cpu")
+    detector = create_detector(args.family, device)
+    if device == "cuda":
+        print(f"CUDA detector: {detector.gpu_name}; CPU local searches and KB pose fitting", flush=True)
     summaries = {tag_id: {} for tag_id in outputs}
+    if candidate_observations is not None:
+        candidate_observations.update({tag_id: {} for tag_id in outputs})
     for camera_id, stream in STREAMS.items():
         pending = {}
         for tag_id, output in outputs.items():
             cache = output / f"observations_{camera_id}.json"
             expected = {"recording": str(directory.resolve()),
                         "family": args.family, "id": tag_id, "frames": args.max_frames,
-                        "flow_max_frames": args.flow_max_frames, "tracking_version": 3}
+                        "flow_max_frames": args.flow_max_frames, "tracking_version": 4}
+            expected.update(detection_cache_settings(device))
             if args.reuse_detections and cache.exists():
                 payload = json.loads(cache.read_text())
                 if payload.get("config") != expected:
-                    raise ValueError(f"Cached detection settings differ: {cache}")
+                    raise ValueError(f"Cached detection settings differ: {cache}. "
+                                     "Run once without --reuse-detections to rebuild all duplicate candidates.")
                 summaries[tag_id][camera_id] = payload["frames"]
+                if candidate_observations is not None:
+                    candidate_observations[tag_id][camera_id] = payload["candidates"]
                 print(f"Reused detections for ID {tag_id} / {camera_id}", flush=True)
             else:
                 pending[tag_id] = (cache, expected)
@@ -365,6 +521,7 @@ def collect_tag_observations(directory, outputs, metadata, cameras, timestamps, 
         camera = cameras[camera_id]
         states = {tag_id: TagTrackingState() for tag_id in pending}
         observations = {tag_id: [] for tag_id in pending}
+        candidates = {tag_id: [] for tag_id in pending}
         previous_gray = None
         limit = min(len(timestamps[camera_id]), args.max_frames or len(timestamps[camera_id]))
         try:
@@ -383,16 +540,29 @@ def collect_tag_observations(directory, outputs, metadata, cameras, timestamps, 
                         observation.update(camera=camera_id, frame=index,
                                            timestamp_us=int(timestamps[camera_id][index]))
                     observations[tag_id].append(observation)
+                    choices = [{"corners": d["lb-rb-rt-lt"].tolist(),
+                                "tag_id": tag_id, "source": "decoded",
+                                "margin": float(d["margin"]), "hamming": d["hamming"],
+                                "camera": camera_id, "frame": index,
+                                "timestamp_us": int(timestamps[camera_id][index])}
+                               for d in detections if d["id"] == tag_id]
+                    if observation is not None and observation["source"] != "decoded":
+                        choices.append(observation)
+                    candidates[tag_id].append(choices)
                 previous_gray = gray
                 if index % 120 == 0:
                     counts = ", ".join(f"ID {tag_id}: {sum(o is not None for o in values)}"
                                        for tag_id, values in observations.items())
-                    print(f"{camera_id} {index + 1}/{limit}: {counts} observed", flush=True)
+                    phase = "seed observations (before rigid filtering)" if len(outputs) > 1 else "observed"
+                    print(f"{camera_id} {index + 1}/{limit}: {counts} {phase}", flush=True)
         finally:
             capture.release()
         for tag_id, (cache, expected) in pending.items():
-            cache.write_text(json.dumps({"config": expected, "frames": observations[tag_id]}))
+            cache.write_text(json.dumps({"config": expected, "frames": observations[tag_id],
+                                         "candidates": candidates[tag_id]}))
             summaries[tag_id][camera_id] = observations[tag_id]
+            if candidate_observations is not None:
+                candidate_observations[tag_id][camera_id] = candidates[tag_id]
     return summaries
 
 
@@ -442,7 +612,7 @@ def associate_frames(observations, timestamps, max_sync_us, limit):
             if abs(int(camera_times[nearest]) - int(timestamp)) <= max_sync_us and nearest < len(observations[camera_id]):
                 observation = observations[camera_id][nearest]
                 if observation is not None:
-                    matched.append(observation)
+                    matched.extend(observation if isinstance(observation, list) else [observation])
         frames.append(matched)
     return frames
 
@@ -541,6 +711,7 @@ def export_results(output, results, cameras, timestamps, observations, args):
         sync[camera_id] = {"median_us": float(np.median(differences)), "max_us": int(max(differences))}
     summary = {
         "recording": str(args.recording.resolve()), "family": args.family, "id": args.tag_id,
+        "detector_device": getattr(args, "device", "cpu"),
         "tagsize_m": args.tagsize, "reference_frame": "cam_0 / Color_Left optical frame",
         "transform_convention": "p_cam0 = R_cam0_tag @ p_tag + t_cam0_tag",
         "extrinsics_translation_input_unit": "mm", "output_translation_unit": "m",
@@ -581,8 +752,52 @@ def aggregate_tag_status(status):
     return overall, np.count_nonzero(status != "lost", axis=1)
 
 
-def estimate_tag_alignment(tag_results, reference_id=None, min_samples=3):
-    """Estimate fixed tag-to-reference transforms from simultaneous raw poses."""
+def rigid_transform_consensus(rotations, translations, frame_ids=None, min_samples=3,
+                              min_fraction=.5, max_translation=.01, max_rotation_deg=10.):
+    """Find a fixed transform with bounded errors, counting distinct frames."""
+    rotations, translations = np.asarray(rotations), np.asarray(translations)
+    if len(rotations) < min_samples:
+        return None
+    frame_ids = np.arange(len(rotations)) if frame_ids is None else np.asarray(frame_ids)
+    required = max(min_samples, int(np.ceil(len(np.unique(frame_ids)) * min_fraction)))
+    max_angle = np.deg2rad(max_rotation_deg)
+    best, best_score = None, None
+    for index in np.unique(np.linspace(0, len(rotations) - 1, min(192, len(rotations)), dtype=int)):
+        errors_t = np.linalg.norm(translations - translations[index], axis=1)
+        errors_R = (Rotation.from_matrix(rotations[index]).inv()
+                    * Rotation.from_matrix(rotations)).magnitude()
+        keep = (errors_t <= max_translation) & (errors_R <= max_angle)
+        support = len(np.unique(frame_ids[keep]))
+        score = (support, -float(np.median(errors_t[keep] / max_translation
+                                          + errors_R[keep] / max_angle)))
+        if best_score is None or score > best_score:
+            best, best_score = keep, score
+    if best_score[0] < required:
+        return None
+    for _ in range(3):
+        # One sample per frame prevents duplicate detections from inflating support.
+        chosen = np.flatnonzero(best)
+        _, unique = np.unique(frame_ids[chosen], return_index=True)
+        chosen = chosen[unique]
+        center_R = Rotation.from_matrix(rotations[chosen]).mean()
+        center_t = np.median(translations[chosen], axis=0)
+        errors_t = np.linalg.norm(translations - center_t, axis=1)
+        errors_R = (center_R.inv() * Rotation.from_matrix(rotations)).magnitude()
+        keep = (errors_t <= max_translation) & (errors_R <= max_angle)
+        if len(np.unique(frame_ids[keep])) < required:
+            return None
+        if np.array_equal(best, keep):
+            break
+        best = keep
+    return {"T": matrix(center_R.as_matrix(), center_t), "inliers": best,
+            "support_frames": len(np.unique(frame_ids[best])),
+            "translation_p95_mm": float(np.percentile(errors_t[best], 95) * 1000),
+            "rotation_p95_deg": float(np.rad2deg(np.percentile(errors_R[best], 95)))}
+
+
+def estimate_tag_alignment(tag_results, reference_id=None, min_samples=3, allow_partial=False,
+                           max_translation=.01, max_rotation_deg=10.):
+    """Calibrate only tag pairs with a consistent fixed relative transform."""
     tag_ids = list(tag_results)
     reference_id = tag_ids[0] if reference_id is None else reference_id
     if reference_id not in tag_results:
@@ -598,41 +813,33 @@ def estimate_tag_alignment(tag_results, reference_id=None, min_samples=3):
             pairs = multiview
         if len(pairs) < min_samples:
             continue
-        rotations = np.array([a["R"].T @ b["R"] for a, b in pairs])
-        translations = np.array([a["R"].T @ (b["t"] - a["t"]) for a, b in pairs])
-        inliers = np.ones(len(pairs), dtype=bool)
-        for _ in range(3):
-            center_R = Rotation.from_matrix(rotations[inliers]).mean()
-            center_t = np.median(translations[inliers], axis=0)
-            rotation_error = (center_R.inv() * Rotation.from_matrix(rotations)).magnitude()
-            translation_error = np.linalg.norm(translations - center_t, axis=1)
-            limits = []
-            for errors, floor in ((rotation_error, np.deg2rad(2)), (translation_error, .002)):
-                median = np.median(errors[inliers])
-                mad = np.median(np.abs(errors[inliers] - median))
-                limits.append(max(floor, median + 3 * 1.4826 * mad))
-            candidate = (rotation_error <= limits[0]) & (translation_error <= limits[1])
-            if np.count_nonzero(candidate) < min_samples or np.array_equal(candidate, inliers):
-                break
-            inliers = candidate
-        center_R = Rotation.from_matrix(rotations[inliers]).mean().as_matrix()
-        center_t = np.median(translations[inliers], axis=0)
-        errors_t = np.linalg.norm(translations[inliers] - center_t, axis=1)
-        errors_R = (Rotation.from_matrix(center_R).inv() * Rotation.from_matrix(rotations[inliers])).magnitude()
-        edges.append({"from_id": first, "to_id": second, "T_from_to": matrix(center_R, center_t).tolist(),
-                      "samples": len(pairs), "inliers": int(np.count_nonzero(inliers)),
-                      "translation_p95_mm": float(np.percentile(errors_t, 95) * 1000),
-                      "rotation_p95_deg": float(np.rad2deg(np.percentile(errors_R, 95)))})
+        rotations = [a["R"].T @ b["R"] for a, b in pairs]
+        translations = [a["R"].T @ (b["t"] - a["t"]) for a, b in pairs]
+        consensus = rigid_transform_consensus(rotations, translations, min_samples=min_samples,
+                                             max_translation=max_translation,
+                                             max_rotation_deg=max_rotation_deg)
+        edge = {"from_id": first, "to_id": second, "samples": len(pairs),
+                "accepted": consensus is not None}
+        if consensus is None:
+            edge.update(inliers=0, rejection_reason="No majority with a stable relative transform")
+        else:
+            edge.update(T_from_to=consensus["T"].tolist(), inliers=consensus["support_frames"],
+                        translation_p95_mm=consensus["translation_p95_mm"],
+                        rotation_p95_deg=consensus["rotation_p95_deg"])
+        edges.append(edge)
     transforms = {reference_id: np.eye(4)}
     paths = {reference_id: [reference_id]}
     while active - transforms.keys():
-        choices = [edge for edge in edges
-                   if (edge["from_id"] in transforms) != (edge["to_id"] in transforms)]
+        choices = [edge for edge in edges if edge["accepted"]
+                   and (edge["from_id"] in transforms) != (edge["to_id"] in transforms)]
         if not choices:
+            if allow_partial:
+                break
             missing = sorted(active - transforms.keys())
             raise ValueError(f"Cannot align tag IDs {missing} to ID {reference_id}: "
-                             f"need at least {min_samples} simultaneous measured poses connecting the IDs")
-        edge = max(choices, key=lambda item: item["inliers"])
+                             f"need at least {min_samples} consistent simultaneous measured poses connecting the IDs")
+        edge = max(choices, key=lambda item: item["inliers"] / (
+            1 + (item["translation_p95_mm"] / 2) ** 2 + (item["rotation_p95_deg"] / 2) ** 2))
         first, second = edge["from_id"], edge["to_id"]
         transform = np.array(edge["T_from_to"])
         if first not in transforms:
@@ -644,19 +851,23 @@ def estimate_tag_alignment(tag_results, reference_id=None, min_samples=3):
             "transform_convention": "p_reference = T_reference_tag @ p_tag",
             "T_reference_tag": {str(tag_id): transform.tolist() for tag_id, transform in transforms.items()},
             "paths": {str(tag_id): path for tag_id, path in paths.items()},
-            "unobserved_tag_ids": sorted(set(tag_ids) - active), "edges": edges}
+            "unobserved_tag_ids": sorted(set(tag_ids) - active),
+            "unaligned_tag_ids": sorted(active - transforms.keys()),
+            "quality_limits": {"translation_m": max_translation, "rotation_deg": max_rotation_deg,
+                               "minimum_inlier_fraction": .5}, "edges": edges}
 
 
-def fuse_tag_results(tag_results, reference_id=None, cutoff=4.):
+def fuse_tag_results(tag_results, reference_id=None, cutoff=4., alignment=None):
     """Fuse available tag poses after converting each to the same tag frame."""
     tag_ids = list(tag_results)
     first_rows = tag_results[tag_ids[0]]
     for rows in tag_results.values():
         if [row["timestamp_us"] for row in rows] != [row["timestamp_us"] for row in first_rows]:
             raise ValueError("Tag pose timestamps must match for global fusion")
-    alignment = estimate_tag_alignment(tag_results, reference_id)
+    alignment = estimate_tag_alignment(tag_results, reference_id) if alignment is None else alignment
     inverses = {int(tag_id): np.linalg.inv(transform)
                 for tag_id, transform in alignment["T_reference_tag"].items()}
+    tag_ids = [tag_id for tag_id in tag_ids if tag_id in inverses]
     status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
     overall, n_valid = aggregate_tag_status(status)
     filter_state = AdaptiveFilter(cutoff)
@@ -689,6 +900,130 @@ def fuse_tag_results(tag_results, reference_id=None, cutoff=4.):
                           n_views=len({camera for row in kept for camera in row["cameras"]}))
         results.append(result)
     return results, alignment
+
+
+def resolve_rigid_candidates(candidate_frames, tag_results, cameras, args):
+    """Select physical tags using a calibrated layout, retaining duplicate IDs."""
+    reference_id = next(iter(tag_results))
+    if not any(row["status"] == "measured" for row in tag_results[reference_id]):
+        raise ValueError(f"Cannot calibrate reference ID {reference_id}: "
+                         "record clear common views or choose a visible reference first in --tag-ids")
+    alignment = estimate_tag_alignment(tag_results, allow_partial=True,
+                                       max_translation=args.alignment_max_translation,
+                                       max_rotation_deg=args.alignment_max_rotation)
+    if len(alignment["T_reference_tag"]) == 1:
+        # The requested reference can itself have a persistent background duplicate.
+        # Bootstrap from a consistent target group, then express the result in the
+        # requested frame once its correct physical candidate has been calibrated.
+        alternatives = [estimate_tag_alignment(tag_results, tag_id, allow_partial=True,
+                                               max_translation=args.alignment_max_translation,
+                                               max_rotation_deg=args.alignment_max_rotation)
+                        for tag_id in tag_results if tag_id != reference_id]
+        if alternatives:
+            alignment = max([alignment, *alternatives], key=lambda item: len(item["T_reference_tag"]))
+    anchors, _ = fuse_tag_results(tag_results, cutoff=args.cutoff, alignment=alignment)
+    tag_ids = list(tag_results)
+    count = len(anchors)
+    discoveries = []
+    for tag_id in tag_ids:
+        if str(tag_id) in alignment["T_reference_tag"]:
+            continue
+        rotations, translations, frame_ids = [], [], []
+        for index, anchor in enumerate(anchors):
+            if anchor["status"] != "measured" or anchor.get("n_views", 0) < 2:
+                continue
+            for observation in candidate_frames[tag_id][index]:
+                if observation["source"] not in ("decoded", "rectified"):
+                    continue
+                for R, t in monocular_candidates(observation, cameras[observation["camera"]],
+                                                 object_points(args.tagsize)):
+                    if np.all(np.isfinite(t)) and .03 < np.linalg.norm(t) < 20:
+                        rotations.append(anchor["R"].T @ R)
+                        translations.append(anchor["R"].T @ (t - anchor["t"]))
+                        frame_ids.append(index)
+        consensus = rigid_transform_consensus(
+            rotations, translations, frame_ids, min_samples=max(3, min(10, count // 10)),
+            min_fraction=.15, max_translation=args.alignment_max_translation,
+            max_rotation_deg=args.alignment_max_rotation)
+        if consensus is None:
+            print(f"ID {tag_id}: no reliable rigid calibration; excluded from global pose", flush=True)
+            continue
+        alignment["T_reference_tag"][str(tag_id)] = consensus["T"].tolist()
+        alignment["paths"][str(tag_id)] = [alignment["reference_tag_id"], tag_id]
+        discoveries.append({"tag_id": tag_id, "reference_tag_id": alignment["reference_tag_id"],
+                            "method": "duplicate_candidate_consensus",
+                            "candidate_frames": len(set(frame_ids)),
+                            **{key: consensus[key] for key in (
+                                "support_frames", "translation_p95_mm", "rotation_p95_deg")}})
+        print(f"ID {tag_id}: calibrated from {consensus['support_frames']} consistent candidate frames", flush=True)
+    if str(reference_id) not in alignment["T_reference_tag"]:
+        raise ValueError(f"Cannot calibrate requested reference ID {reference_id}; "
+                         "record common views or choose another reference first in --tag-ids")
+    if alignment["reference_tag_id"] != reference_id:
+        alignment["bootstrap_reference_tag_id"] = alignment["reference_tag_id"]
+        T_bootstrap_reference = np.array(alignment["T_reference_tag"][str(reference_id)])
+        inverse = np.linalg.inv(T_bootstrap_reference)
+        alignment["T_reference_tag"] = {key: (inverse @ value).tolist()
+                                        for key, value in alignment["T_reference_tag"].items()}
+        reference_path = alignment["paths"][str(reference_id)]
+        for key, path in alignment["paths"].items():
+            common = 0
+            for first, second in zip(reference_path, path):
+                if first != second:
+                    break
+                common += 1
+            alignment["paths"][key] = reference_path[common - 1:][::-1] + path[common:]
+        alignment["reference_tag_id"] = reference_id
+        for anchor in anchors:
+            if anchor["status"] != "lost":
+                pose = matrix(anchor["R"], anchor["t"]) @ T_bootstrap_reference
+                anchor.update(R=pose[:3, :3], t=pose[:3, 3])
+    aligned = {int(key) for key in alignment["T_reference_tag"]}
+    alignment["unaligned_tag_ids"] = sorted(set(tag_ids) - aligned)
+    alignment["candidate_calibrations"] = discoveries
+    points = {int(key): object_points(args.tagsize) @ np.array(value)[:3, :3].T + np.array(value)[:3, 3]
+              for key, value in alignment["T_reference_tag"].items()}
+    selected = {tag_id: [[] for _ in range(count)] for tag_id in tag_ids}
+    candidate_count = selected_count = duplicate_groups = 0
+    previous, last_time = None, -np.inf
+    reliable = [i for i, anchor in enumerate(anchors)
+                if anchor["status"] == "measured" and len(anchor["source_tag_ids"]) >= 2]
+    for index, anchor in enumerate(anchors):
+        all_candidates = [row for tag_id in tag_ids for row in candidate_frames[tag_id][index]]
+        observations = [row for row in all_candidates if row["tag_id"] in aligned]
+        candidate_count += len(all_candidates)
+        groups = {}
+        for row in all_candidates:
+            key = (row["camera"], row["tag_id"])
+            groups[key] = groups.get(key, 0) + 1
+        duplicate_groups += sum(n > 1 for n in groups.values())
+        prior = None
+        unambiguous = not reliable and anchor["status"] == "measured" and all(n == 1 for n in groups.values())
+        if index in reliable or unambiguous:
+            prior = matrix(anchor["R"], anchor["t"])
+        elif anchor["time_s"] - last_time < .2:
+            prior = previous
+        elif reliable:
+            nearest = min(reliable, key=lambda i: abs(anchors[i]["time_s"] - anchor["time_s"]))
+            if abs(anchors[nearest]["time_s"] - anchor["time_s"]) < .2:
+                # Offline initialization may use a nearby jointly supported frame.
+                # A lone seed observation must not validate its own background ID.
+                prior = matrix(anchors[nearest]["R"], anchors[nearest]["t"])
+        fit = fit_rigid_detections(observations, cameras, points, args.tagsize, alignment, prior,
+                                   max_error=args.max_reprojection, allow_single_view=True,
+                                   max_hypotheses=2)
+        if fit is not None:
+            for row in fit["observations"]:
+                selected[row["tag_id"]][index].append(row)
+            selected_count += len(fit["observations"])
+            previous, last_time = matrix(fit["R"], fit["t"]), anchor["time_s"]
+        if index % 120 == 0:
+            print(f"Selecting rigid tag candidates {index + 1}/{count}", flush=True)
+    report = {"candidate_observations": candidate_count, "selected_observations": selected_count,
+              "rejected_observations": candidate_count - selected_count,
+              "groups_with_multiple_candidates": duplicate_groups,
+              "unaligned_tag_ids": alignment["unaligned_tag_ids"]}
+    return selected, alignment, report
 
 
 def export_global_results(output, results, alignment, tag_ids):
@@ -783,6 +1118,7 @@ def export_tag_results(output, outputs, summaries):
         "timestamp_sync", "limitations",
     )}
     summary.update(
+        detector_device=first.get("detector_device", "cpu"),
         tag_ids=tag_ids, frames=count,
         valid_frames=int(np.count_nonzero(global_status != "lost")),
         lost_frames=int(np.count_nonzero(global_status == "lost")),
@@ -978,6 +1314,14 @@ def draw_tag_overlay(image, camera, observation, result, tag_id, axes):
 
 def render_tag_video(directory, output, metadata, cameras, tag_frames, tag_results, args):
     tag_ids = list(tag_results)
+    trail = None
+    if getattr(args, "trail_seconds", 0.) > 0:
+        pose_path = output / ("global_poses.npz" if len(tag_ids) > 1 else "poses.npz")
+        with np.load(pose_path) as payload:
+            key = "T_cam0_global_raw" if len(tag_ids) > 1 else "T_cam0_tag_raw"
+            trail = ReferenceTrail(payload[key], payload["timestamp_us"], payload["status"],
+                                   tag_ids[0], args.trail_seconds)
+        trail.export(output / "reference_trail.csv")
     results = tag_results[tag_ids[0]]
     status = np.array([[row["status"] for row in tag_results[tag_id]] for tag_id in tag_ids]).T
     global_status, _ = aggregate_tag_status(status)
@@ -1000,6 +1344,8 @@ def render_tag_video(directory, output, metadata, cameras, tag_frames, tag_resul
             if not ok:
                 raise RuntimeError(f"Preview video ended early: {stream}")
             image = cv2.resize(image, (640, 400), interpolation=cv2.INTER_AREA)
+            if trail is not None:
+                trail.draw(image, cameras[camera_id], index)
             for tag_id in tag_ids:
                 found = next((o for o in tag_frames[tag_id][index] if o["camera"] == camera_id), None)
                 draw_tag_overlay(image, cameras[camera_id], found,
@@ -1066,19 +1412,27 @@ def parse_args(argv=None):
                         help="Original EGOViewer recording directory containing meta_*.json")
     parser.add_argument("--tagsize", type=float, required=True, help="Detection-square side in meters")
     parser.add_argument("--family", default="tag36h11")
+    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu",
+                        help="Full-image detector; CUDA requires setup_ego_cuda.sh (poses remain on CPU)")
     tags = parser.add_mutually_exclusive_group()
     tags.add_argument("--tag-id", type=int, help="Track one ID (default: 0)")
-    tags.add_argument("--tag-ids", type=int, nargs="+", help="Track multiple IDs, e.g. --tag-ids 0 1 2")
+    tags.add_argument("--tag-ids", type=int, nargs="+",
+                      help="Track multiple rigid IDs; first ID is the reference, e.g. --tag-ids 1 0 2 3")
     parser.add_argument("--output", type=Path, default=ROOT / "outputs/ego_multicam",
                         help="Directory for generated tracking results")
     parser.add_argument("--max-frames", type=int, default=0, help="0 processes the entire recording")
     parser.add_argument("--max-sync-us", type=int, default=1000)
     parser.add_argument("--max-reprojection", type=float, default=2.5)
+    parser.add_argument("--alignment-max-translation", type=float, default=.01,
+                        help="Maximum tag-layout translation deviation in meters (default: 0.01)")
+    parser.add_argument("--alignment-max-rotation", type=float, default=10.,
+                        help="Maximum tag-layout rotation deviation in degrees (default: 10)")
     parser.add_argument("--flow-max-frames", type=int, default=15,
                         help="Maximum frames tracked without decoding; flow-only poses require two views")
     parser.add_argument("--cutoff", type=float, default=4., help="Minimum causal filter cutoff, Hz")
     parser.add_argument("--reuse-detections", action="store_true")
     parser.add_argument("--no-video", action="store_true")
+    parser.add_argument("--trail-seconds", type=float, default=0., help="Reference tag motion trail duration; 0 disables")
     args = parser.parse_args(argv)
     if args.tag_id is None:
         args.tag_id = 0
@@ -1089,8 +1443,11 @@ def parse_args(argv=None):
         parser.error("flow-max-frames, tag-id and max-sync-us must be nonnegative")
     if len(set(tag_ids)) != len(tag_ids):
         parser.error("tag-ids must not contain duplicates")
-    if not np.isfinite(args.cutoff) or args.cutoff <= 0 or not np.isfinite(args.max_reprojection) or args.max_reprojection <= 0:
-        parser.error("cutoff and max-reprojection must be positive finite values")
+    if not np.isfinite(args.trail_seconds) or args.trail_seconds < 0:
+        parser.error("trail-seconds must be a nonnegative finite number")
+    if any(not np.isfinite(value) or value <= 0 for value in (
+            args.cutoff, args.max_reprojection, args.alignment_max_translation, args.alignment_max_rotation)):
+        parser.error("cutoff, max-reprojection and alignment tolerances must be positive finite values")
     return args
 
 
@@ -1107,21 +1464,47 @@ def main(argv=None):
     for output in outputs.values():
         output.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    observations = collect_tag_observations(args.recording, outputs, metadata, cameras, timestamps, args)
+    if len(tag_ids) > 1:
+        print(f"Reference ID {tag_ids[0]}; retaining duplicate candidates for rigid-layout selection", flush=True)
+    candidates = {}
+    observations = collect_tag_observations(args.recording, outputs, metadata, cameras, timestamps, args,
+                                           candidate_observations=candidates)
     limit = min(len(timestamps["cam_0"]), args.max_frames or len(timestamps["cam_0"]))
     frames, results, summaries = {}, {}, {}
-    for tag_id, output in outputs.items():
+    for tag_id in outputs:
         tag_args = argparse.Namespace(**{**vars(args), "tag_id": tag_id})
-        print(f"Solving tag ID {tag_id}", flush=True)
+        print(f"Solving seed tag ID {tag_id}", flush=True)
         frames[tag_id] = associate_frames(observations[tag_id], timestamps, args.max_sync_us, limit)
         results[tag_id] = solve_sequence(frames[tag_id], timestamps, cameras, tag_args)
+    alignment, selection_report = None, None
+    if len(tag_ids) > 1:
+        candidate_frames = {tag_id: associate_frames(candidates[tag_id], timestamps, args.max_sync_us, limit)
+                            for tag_id in tag_ids}
+        frames, alignment, selection_report = resolve_rigid_candidates(candidate_frames, results, cameras, args)
+        for tag_id in tag_ids:
+            tag_args = argparse.Namespace(**{**vars(args), "tag_id": tag_id})
+            print(f"Solving selected target ID {tag_id}", flush=True)
+            results[tag_id] = solve_sequence(frames[tag_id], timestamps, cameras, tag_args)
+        # Export counts for selected target observations, rather than seed tracks.
+        observations = {tag_id: {camera_id: [None] * len(times) for camera_id, times in timestamps.items()}
+                        for tag_id in tag_ids}
+        for tag_id in tag_ids:
+            for frame in frames[tag_id]:
+                for row in frame:
+                    observations[tag_id][row["camera"]][row["frame"]] = row
+    for tag_id, output in outputs.items():
+        tag_args = argparse.Namespace(**{**vars(args), "tag_id": tag_id})
+        if len(tag_ids) > 1:
+            for camera_id, selected in observations[tag_id].items():
+                (output / f"selected_observations_{camera_id}.json").write_text(json.dumps({"frames": selected}))
         summaries[tag_id] = export_results(output, results[tag_id], cameras, timestamps,
                                            observations[tag_id], tag_args)
         plot_results(output, results[tag_id], tag_id=tag_id)
     summary = export_tag_results(args.output, outputs, summaries) if len(tag_ids) > 1 else summaries[tag_ids[0]]
     if len(tag_ids) > 1:
-        global_results, alignment = fuse_tag_results(results, cutoff=args.cutoff)
+        global_results, alignment = fuse_tag_results(results, cutoff=args.cutoff, alignment=alignment)
         summary["global_pose"] = export_global_results(args.output, global_results, alignment, tag_ids)
+        summary["candidate_selection"] = selection_report
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         plot_tag_results(args.output, results, global_results, alignment["reference_tag_id"])
     if not args.no_video:

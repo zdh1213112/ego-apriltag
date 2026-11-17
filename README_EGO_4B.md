@@ -1,301 +1,145 @@
-# EGO-4B AprilTag 上手指南
+# EGO-4B AprilTag 使用指南
 
-这份文档面向 **Orbbec EGO-4B 四相机头环**：用 EGOViewer 录好视频后，在本项目中跟踪 AprilTag，得到相对头环的三维位置、朝向和预览视频。
+**操作顺序：准备录制 → 运行处理 → 查看结果。** 跟踪、优化、恢复和视频生成由程序连续执行。
 
-**日常流程：设置录制路径和标签尺寸 → 小段试跑 → 完整跟踪 → 按需恢复丢帧并生成视频。**
+本机已经安装好 CPU 和 CUDA 检测后端，直接从第 1 步开始。新电脑先完成一次[安装与编译](docs/EGO_COMMANDS.md#首次使用安装与检查)；使用 NVIDIA GPU 时再完成[CUDA 后端编译](docs/EGO_COMMANDS.md#启用-nvidia-gpu仅首次编译)。
 
-本指南独立于原有 [README.md](README.md)。详细算法说明见 [docs/EGO_MULTICAM.md](docs/EGO_MULTICAM.md)。
+## 1. 准备录制并进入项目
 
-- [日常使用：按顺序复制执行](#日常使用按顺序复制执行)
-- [结果怎么看](#结果怎么看)
-- [其他常用指令](#其他常用指令)
-- [首次使用：安装与检查](#首次使用安装与检查)
-- [录制数据怎么准备](#录制数据怎么准备)
-- [常见问题](#常见问题)
+先用 EGOViewer 录好四路相机视频，保留完整录制目录。下面使用本次的 `EGO-4B_AZLCA610091_20261117_110204`。
 
-## 日常使用：按顺序复制执行
-
-以下命令使用 **Bash**，在项目根目录执行，统一使用 `/usr/bin/python3`。新机器先完成[安装与检查](#首次使用安装与检查)。
-
-### 1. 设置本次要处理的数据
-
-示例使用本机已有的 `20261028_112103` 录制，其已有结果记录的设置为 `tag36h11`、ID `0 1 2`、检测边长 **20 mm**。录制数据不随 Git 分发；其他机器请换成自己的录制。
+录制目录里应能找到 `meta_*.json`。命令要指向这一层，不能指向里面的 `part0001/`，也不能填之前生成的结果目录。
 
 ```bash
 cd /home/zdh/apriltag
-
-RUN="EGO-4B_AZLCA610091_20261028_112103"
-TAGSIZE="0.020"
-RECORDING="$PWD/recordings/$RUN"
-OUT="$PWD/outputs/${RUN}_${TAGSIZE}m"
 ```
 
-换数据时，修改 `RUN` 和 `TAGSIZE` 后，把上面这一整段重新执行。若项目放在其他位置，也要修改 `cd` 路径。若录制放在项目外，直接把 `RECORDING` 改为该录制的完整路径。
+准备好同一物体上的 **ID 0、1、2、3**，标签家族为 **tag36h11**，各码尺寸相同、相对固定。标签边长要量黑色外框外缘，不含外围白边。
 
-| 设置 | 含义 |
-|---|---|
-| `RUN` | 本次录制名称，也用于给结果目录命名 |
-| `TAGSIZE` | 标签检测边长，单位为米；20 mm 填 `0.020`，30 mm 填 `0.030` |
-| `RECORDING` | 原始录制目录，里面应有 `meta_*.json` |
-| `OUT` | 保存本次结果的目录，由脚本自动创建 |
+## 2. 运行完整处理命令
 
-后续命令默认跟踪 **同一物体上、同一尺寸的 ID 0、1、2**。如果只贴了一个码，使用[单码跟踪命令](#只跟踪一个标签)。如果使用其他家族或 ID，修改命令里的 `--family`、`--tag-ids`。
-
-**尺寸要实测：** `tag36h11` 量黑色外框外缘的一条边，不含外围白边，也不是整张纸的宽度。其他家族的测量边界见[尺寸说明](tag_family_examples/README.md#tagsize-怎么量)。多码命令要求所有码尺寸相同。
-
-### 2. 先试跑前 120 帧
+复制下面整段执行。这条命令处理完整录制，并以 **ID 0** 为参考标签：
 
 ```bash
-/usr/bin/python3 scripts/track_ego_apriltag.py "$RECORDING" \
-  --family tag36h11 --tag-ids 0 1 2 --tagsize "$TAGSIZE" \
-  --max-frames 120 \
-  --output "${OUT}_check"
+/usr/bin/python3 scripts/run_ego_apriltag.py \
+  recordings/EGO-4B_AZLCA610091_20261117_110204 \
+  --family tag36h11 \
+  --tag-ids 0 1 2 3 \
+  --tagsize 0.020 \
+  --reference 0 \
+  --device cuda \
+  --flow-max-frames 15 \
+  --cutoff 4 \
+  --max-sync-us 1000 \
+  --max-reprojection 2.5 \
+  --alignment-max-translation 0.010 \
+  --alignment-max-rotation 10 \
+  --recovery on \
+  --max-gap-frames 3 \
+  --trail-seconds 1.5
 ```
 
-30 fps 的录制中，120 帧约为前 4 秒画面；处理耗时取决于电脑性能。完成后，先用视频播放器打开 `${OUT}_check/tracking_preview.mp4`，确认标签 ID、框线和坐标轴合理。
+命令中明确指定标签和计算后端，换录制时逐项核对：
 
-试跑结果单独写入带 `_check` 的目录。若提示 `Cannot align tag IDs`，参照[常见问题](#常见问题)，适当增加试跑帧数，让多个标签有共同可见的机会。
-
-### 3. 处理完整录制
-
-```bash
-/usr/bin/python3 scripts/track_ego_apriltag.py "$RECORDING" \
-  --family tag36h11 --tag-ids 0 1 2 --tagsize "$TAGSIZE" \
-  --output "$OUT"
-```
-
-不带 `--max-frames` 就处理完整输入视频。完成后，终端会打印输出目录、各 ID 的有效帧数，以及整体跟踪覆盖率。结果先看 `$OUT/tracking_preview.mp4` 和 `$OUT/trajectory.png`。
-
-**一般使用到这一步即可。** 如果视频里有短暂丢失，再执行下面两步。
-
-### 4. 恢复短暂丢帧（可选）
-
-这一步需要上一步的**多码结果目录**，同时需要原始录制仍保存在原路径。
-
-```bash
-/usr/bin/python3 scripts/recover_ego_apriltag.py "$OUT" \
-  --output "${OUT}_recovered"
-```
-
-脚本在丢帧附近重新检测、双向光流跟踪，并尝试补齐符合条件的短缺口。默认最多插值补 3 帧，且两端有效位姿间隔不超过 0.15 秒；长缺口和首尾缺口保留为 `lost`。
-
-恢复后的统一位姿、图表和统计写入 `${OUT}_recovered`，原始跟踪结果保留。**插值帧是估计值**，在表格中标为 `status=interpolated`，图中以橙色点标出。
-
-如果不希望做插值，使用下面的命令替代上面的恢复命令：
-
-```bash
-/usr/bin/python3 scripts/recover_ego_apriltag.py "$OUT" \
-  --max-gap-frames 0 --output "${OUT}_recovered"
-```
-
-### 5. 为恢复结果生成视频（可选）
-
-恢复脚本只生成位姿、图表和统计。要看恢复后的画面，再运行：
-
-```bash
-/usr/bin/python3 scripts/render_ego_recovery.py "${OUT}_recovered"
-```
-
-完成后查看 `${OUT}_recovered/tracking_preview.mp4`；单路视频在同目录的 `camera_previews/` 中。视频里的 `ESTIMATED` 和橙色边框表示插值帧。此步骤需要带 `libx264` 编码器的 FFmpeg。
-
-重新渲染还会读取原始跟踪结果和录制，所以请一起保留 `RECORDING`、`OUT` 和恢复目录。
-
-## 结果怎么看
-
-下表针对 ID `0 1 2` 的多码跟踪。优先看根目录的**统一位姿**；需要某个标签自己的结果时，再进入 `tag_0/`、`tag_1/` 或 `tag_2/`。
-
-| 文件 | 用途 |
-|---|---|
-| `tracking_preview.mp4` | 四路拼接预览，检查跟踪效果 |
-| `camera_previews/cam_0.mp4` 至 `cam_3.mp4` | 各相机单独预览 |
-| `trajectory.png` | 统一位姿的位置曲线，单位为米 |
-| `orientation.png` | 相对第一帧有效朝向的旋转向量曲线，单位为度，不是欧拉角 |
-| `tracking_status.png` | 整体跟踪状态 |
-| `global_poses.csv` / `global_poses.npz` | 每帧一份统一位姿，供后续程序使用 |
-| `global_tracking.csv` | 原始多码跟踪中每帧的整体状态、有效码数量 |
-| `poses.csv` / `poses.npz` | 原始多码跟踪中各个 ID 的独立位姿合集 |
-| `tag_0/`、`tag_1/`、`tag_2/` | 各 ID 的独立结果、曲线和检测缓存 |
-| `tag_alignment.json` | 多个标签到统一参考标签的固定变换 |
-| `summary.json` | 跟踪质量或恢复统计 |
-
-恢复目录主要保存更新后的 `global_poses.*`、图表和恢复统计，生成视频后再增加预览文件；各 ID 的独立结果仍从原始结果目录读取。
-
-**坐标含义：** `cam_0` 是头环前左相机，X 向右、Y 向下、Z 向前。位置单位为米，四元数顺序为 `x, y, z, w`。`global_poses` 的 `global` 表示多个码融合后的统一参考；参考标签是 `--tag-ids` 中的第一个 ID，本例为 ID 0。
-
-变换方向为 `p_cam0 = R @ p_tag + t`。输出相对头环相机，头环移动时坐标也随之变化；当前没有融合 IMU 来建立固定世界坐标轨迹。
-
-统一位姿要求多个码相对固定，并有足够共同观测来估计码间关系。ID 0 暂时不可见时，可由其他已对齐的码推算该参考位姿；腕带明显变形会影响结果。
-
-| `status` | 含义 |
-|---|---|
-| `measured` | 当前帧有成功解码并通过位姿检查的标签 |
-| `flow_only` | 当前帧依赖通过几何检查的光流观测 |
-| `interpolated` | 恢复流程插值得到的估计，没有当前帧视觉测量 |
-| `lost` | 无可靠位姿，变换矩阵为 NaN |
-
-`raw` 是联合估计，`filtered` 是平滑后的位姿，平滑会带来一定延迟。恢复结果还提供 `pose_source`，区分重新解码、光流恢复、插值及沿用原始结果。
-
-需要在 Python 中读取统一位姿时，在设置过 `OUT` 的终端执行：
-
-```bash
-/usr/bin/python3 - "$OUT/global_poses.npz" <<'PY'
-import sys
-import numpy as np
-
-data = np.load(sys.argv[1])
-T = data["T_cam0_global_filtered"]  # 形状：(帧数, 4, 4)
-visual_valid = np.isin(data["status"], ["measured", "flow_only"])
-positions_m = T[visual_valid, :3, 3]
-print("总帧数：", len(T))
-print("视觉有效帧数：", int(visual_valid.sum()))
-print("有效位置数组形状：", positions_m.shape)
-PY
-```
-
-读取恢复结果时，把路径换成 `"${OUT}_recovered/global_poses.npz"`。上述筛选会排除插值帧和丢失帧。
-
-## 其他常用指令
-
-以下命令沿用第一步设置的 `RECORDING`、`TAGSIZE` 和 `OUT`。新开终端后需要重新执行那一段设置。
-
-### 只跟踪一个标签
-
-例如只跟踪 ID 0：
-
-```bash
-/usr/bin/python3 scripts/track_ego_apriltag.py "$RECORDING" \
-  --family tag36h11 --tag-id 0 --tagsize "$TAGSIZE" \
-  --output "${OUT}_id0"
-```
-
-`--tag-id` 与 `--tag-ids` 二选一。单码结果直接保存在指定目录的 `poses.csv`、`poses.npz` 中，矩阵键名为 `T_cam0_tag_raw` 和 `T_cam0_tag_filtered`；没有多码的 `global_poses.*`，不使用上面的多码恢复流程。
-
-### 已经跟踪过，只重算位姿和图表
-
-在已有**完整跟踪结果**的基础上复用检测缓存：
-
-```bash
-/usr/bin/python3 scripts/track_ego_apriltag.py "$RECORDING" \
-  --family tag36h11 --tag-ids 0 1 2 --tagsize "$TAGSIZE" \
-  --output "$OUT" --reuse-detections --no-video
-```
-
-录制路径、家族、ID、处理帧数、光流设置和代码缓存版本需要与缓存一致。`_check` 目录只包含试跑帧的缓存，不能直接当作全量缓存使用。提示 `Cached detection settings differ` 时，去掉 `--reuse-detections` 重新检测。
-
-该命令会更新结果表格和图表。`--no-video` 会跳过视频生成，已有视频也不会随之更新；需要同步更新视频时，去掉 `--no-video`。
-
-### 本机已有录制用过哪些尺寸
-
-下表来自已有结果的 `summary.json`，便于核对历史命令；新录制的标签仍应实测。
-
-| `RUN` | 家族 / ID | `TAGSIZE` |
+| 命令中的内容 | 含义 | 怎么改 |
 |---|---|---|
-| `EGO-4B_AZLCA610091_20261028_112103` | `tag36h11` / `0 1 2` | `0.020`（20 mm） |
-| `EGO-4B_AZLCA610091_20261027_190651` | `tag36h11` / `0 1 2` | `0.030`（30 mm） |
-| `EGO-4B_AZLCA610091_20261027_182506` | `tag36h11` / `0 1 2` | `0.040`（40 mm） |
+| `recordings/EGO-4B_AZLCA610091_20261117_110204` | 原始录制路径 | 换成自己的录制目录；也可以使用完整路径 |
+| `--family tag36h11` | 标签家族 | 填实际使用的标签家族 |
+| `--tag-ids 0 1 2 3` | 需要跟踪的标签 ID | 写出目标物体上的所有标签 ID |
+| `--tagsize 0.020` | 标签边长，单位为米 | 20 mm 填 `0.020`，30 mm 填 `0.030` |
+| `--reference 0` | 以 ID 0 的中心和坐标轴为物体参考 | 以 ID 1 为参考时改成 `--reference 1` |
+| `--device cuda` | 用 NVIDIA GPU 加速全图标签检测 | 使用 CPU 时明确改成 `--device cpu` |
 
-### 查看全部参数
+**标签家族和 ID 列表必须显式填写，程序不会自动选择。** 上面的命令跟踪 `tag36h11` 的 ID 0、1、2、3。参考 ID 必须属于这份列表；改参考 ID 不会减少跟踪的标签数量。
 
-```bash
-/usr/bin/python3 scripts/track_ego_apriltag.py --help
-/usr/bin/python3 scripts/recover_ego_apriltag.py --help
-/usr/bin/python3 scripts/render_ego_recovery.py --help
-```
+一键命令以显式填写的 `--reference` 为准，`--tag-ids` 的顺序不会覆盖它。以 ID 1 为参考时，把 `--reference 0` 改成 `--reference 1` 即可。
 
-| 跟踪参数 | 用法 |
+优化配置也直接写在同一条命令中，修改对应数值即可：
+
+| 命令中的配置 | 含义 | 怎么改 |
+|---|---|---|
+| `--flow-max-frames 15` | 未重新解码时最多续跟踪 15 帧 | `0` 关闭主跟踪光流；增大可能增加漂移 |
+| `--cutoff 4` | 自适应平滑的最低截止频率，单位 Hz | 调小主要增强低速平滑，也会增加延迟；同时用于主跟踪和恢复结果 |
+| `--max-sync-us 1000` | 跨相机观测匹配允许的最大时间差，单位微秒 | 必须与实际相机同步情况相符 |
+| `--max-reprojection 2.5` | 重投影误差门限，单位像素 | 调小检查更严格，也可能增加丢帧；同时用于主跟踪和恢复 |
+| `--alignment-max-translation 0.010` | 码间位置一致性门限，单位米；这里为 10 mm | 需要更严格时可收紧，可能使部分码无法标定 |
+| `--alignment-max-rotation 10` | 码间朝向一致性门限，单位度 | 需要更严格时可收紧 |
+| `--recovery on` | 执行离线重检和双向光流恢复 | 改成 `off` 时只跟踪并生成视频 |
+| `--max-gap-frames 3` | 恢复阶段最多插值补 3 帧 | 改为 `0` 表示不插值，仍执行视觉恢复；仅在恢复开启时有效 |
+| `--trail-seconds 1.5` | 视频中显示参考 ID 最近 1.5 秒的轨迹拖影 | `0` 关闭拖影；改参考 ID 时拖影随之更换 |
+
+背景同码筛选和多相机拟合属于主跟踪流程，使用上面的误差门限检查观测。本次实际使用的参数会保存到结果目录的 `run_settings.json`。
+
+上面的命令明确启用了恢复，程序按顺序自动完成：
+
+| 终端进度 | 自动处理的内容 |
 |---|---|
-| `--max-frames 120` | 只处理前 120 帧；不传或填 `0` 则处理完整输入 |
-| `--no-video` | 跳过预览视频，只输出数据和图表 |
-| `--reuse-detections` | 复用指定输出目录里的检测缓存 |
-| `--flow-max-frames 15` | 默认值，最多连续 15 帧未解码时继续角点跟踪 |
-| `--flow-max-frames 0` | 关闭光流续跟踪 |
-| `--cutoff 4` | 默认平滑最低截止频率，单位 Hz |
+| `1/3 跟踪标签并计算码间外参` | 筛选背景同码、多相机拟合、异常观测剔除、码间标定和位姿滤波 |
+| `2/3 恢复短暂丢帧` | 重新检测、双向光流恢复，并尝试插值补齐符合条件的短缺口 |
+| `3/3 生成预览视频` | 用最终位姿生成四相机预览视频 |
 
-## 首次使用：安装与检查
+等待终端显示“完成”后再查看结果。**不需要再分别运行跟踪、恢复和渲染脚本。**
 
-本机已有可用配置：Ubuntu、`/usr/bin/python3` 3.10、OpenCV 4.5.4。下面采用系统 Python 安装方式。
+`--device cuda` 加速主跟踪与离线恢复中的全图阈值、连通域和四边形查找。码字解码、边缘细化、局部鱼眼重检、OpenCV 光流、KB 多相机位姿拟合和视频生成仍在 CPU 上执行。保留原始分辨率的重叠分块检测用于减少小标签漏检，仍保留同 ID 的多个候选。当前 CUDA 后端支持 `tag36h11`；其他家族使用 `--device cpu`。
 
-### 安装依赖并编译
+终端会明确显示后端，并持续输出相机帧进度、位姿求解和候选筛选进度；详细记录保存到 `processing.log`。CUDA 不可用时会报错，不会静默切回 CPU。未填写 `--device` 的旧命令仍使用 CPU。
 
-```bash
-cd /home/zdh/apriltag
+## 3. 查看视频、外参和位姿
 
-sudo apt update
-sudo apt install build-essential cmake python3-dev python3-numpy \
-  python3-opencv python3-scipy python3-yaml python3-matplotlib python3-pil \
-  fonts-noto-cjk ffmpeg
-
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_EXAMPLES=OFF \
-  -DBUILD_PYTHON_WRAPPER=ON \
-  -DPython3_EXECUTABLE=/usr/bin/python3
-cmake --build build --parallel 4
-```
-
-脚本自动从项目的 `build/` 加载 AprilTag Python 绑定，按上述方式编译后即可运行。
-
-如果选择自己的虚拟环境，可参考 [requirements-ego.txt](requirements-ego.txt) 安装 Python 依赖，并用该环境的 Python 重新配置、编译绑定。编译和运行必须使用相同的 Python / NumPy 环境。
-
-### 确认检测器可运行
-
-```bash
-/usr/bin/python3 example/python_demo.py \
-  tag_family_examples/apriltag/tag36h11/id_0000.png \
-  --family tag36h11 --output build/detection_check.jpg
-```
-
-正常会显示 `Detected 1 tags (tag36h11)`、`ID=0`，并生成 `build/detection_check.jpg`。检查通过后，回到[日常使用](#日常使用按顺序复制执行)。
-
-## 录制数据怎么准备
-
-先在 EGOViewer 中完成四路相机录制，保留其原始目录结构。把录制放在 `recordings/` 下，或者通过 `RECORDING` 指定外部目录。录制后的离线处理不要求设备持续连接。
-
-一个带 `part0001` 子目录的录制通常如下：
+结束时终端会直接打印“视频”“外参”“位姿”的完整路径。上面的命令对应结果目录为：
 
 ```text
-recordings/
-└── EGO-4B_设备序列号_日期_时间/        ← RECORDING 指向这一层
-    ├── meta_*.json
-    ├── *_calibration_camera.yaml
-    └── part0001/
-        ├── *_camera_left_part0001.mp4
-        ├── *_camera_left_part0001_pts.csv
-        ├── *_camera_right_part0001.mp4
-        ├── *_camera_right_part0001_pts.csv
-        ├── *_camera_right_side_part0001.mp4
-        ├── *_camera_right_side_part0001_pts.csv
-        ├── *_camera_left_side_part0001.mp4
-        └── *_camera_left_side_part0001_pts.csv
+outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/
 ```
 
-脚本通过 `meta_*.json` 中的 `files` 字段找到相机标定、四路视频和时间戳 CSV，兼容文件直接位于录制根目录的布局。保留元数据中的相对路径，避免只复制 MP4 或单独传入 `part0001/`。
-
-当前脚本按 `files` 指向的四路视频处理，不自动遍历、拼接 `segments` 中的多个分段。长录制若有多个分段，需要先另行整理元数据、视频和时间戳。
-
-| 相机 | EGOViewer 视频名 | 位置 |
+| 先后顺序 | 文件 | 用途 |
 |---|---|---|
-| `cam_0` | `left` | 前左，输出坐标的参考相机 |
-| `cam_1` | `right` | 前右 |
-| `cam_2` | `right_side` | 右侧 |
-| `cam_3` | `left_side` | 左侧 |
+| 先看视频 | `tracking_preview.mp4` | 确认框线和坐标轴跟随手持物体，背景同码没有被当成目标 |
+| 再看外参 | `tag_alignment.json` | 查看各标签到所选参考标签的固定变换和标定质量 |
+| 需要导出数据时 | `global_poses.csv` / `global_poses.npz` | 每帧的位置、朝向和跟踪状态 |
+| 需要看变化趋势时 | `trajectory.png` / `orientation.png` | 位置和朝向曲线 |
+| 需要核对本次配置时 | `run_settings.json` | 实际采用的标签、优化和恢复参数 |
 
-标签图案可从 [tag36h11 示例目录](tag_family_examples/apriltag/tag36h11) 取得。PNG 没有固定的物理打印尺寸，打印后仍须测量。录制时让多个码有一段共同可见的清晰画面，并遮住背景中与目标重复的同 ID 标签。
+外参文件中的 `reference_tag_id` 表示所选参考 ID，`T_reference_tag` 保存各码到它的固定变换。统一位姿仍表达在头环的 `cam_0` 相机坐标系中，位置单位为米。
 
-## 常见问题
+本例显式设置最多插值补 3 帧，且两端有效位姿间隔还须不超过 0.15 秒。插值是估计值，视频显示 `ESTIMATED`，数据标为 `interpolated`；长缺口保留为 `lost`。无法可靠标定的 ID 会被列出，不参与融合。
 
-| 现象 | 处理方法 |
+CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没有这个后缀。再次运行相同录制、尺寸、参考 ID 和后端会更新同一目录。使用 `--output` 时以指定路径为准。
+
+## 已经处理完成：只给视频加拖影
+
+已有位姿时，直接执行下面这条命令，读取原始视频重新渲染，不重复检测或求解位姿：
+
+```bash
+/usr/bin/python3 scripts/render_ego_recovery.py \
+  outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda \
+  --trail-seconds 1.5 \
+  --output outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/with_trail
+```
+
+完成后查看 `with_trail/tracking_preview.mp4`，原来的预览视频保留。`with_trail/reference_trail.csv` 保存各帧轨迹点和状态。
+
+拖影显示**所选参考 ID 的中心在头环 `cam_0` 坐标系中的运动历史**，再按相机外参投影到四路画面。它包含物体与头环的相对运动。使用当前未平滑位姿与视频坐标轴对齐；越旧的线段越淡，青色表示视觉位姿，橙色表示包含插值的线段，丢失处断开。
+
+## 检查外参是否稳定
+
+```bash
+/usr/bin/python3 scripts/check_ego_alignment.py \
+  outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda
+```
+
+检查报告保存为 `alignment_quality.json`，统计各标签相对参考 ID 的位置、朝向偏差，以及前后半段估计的差异。检查仅使用两个标签均有至少两路相机支持的解码位姿，排除纯光流和插值帧。
+
+这些是同一录制内的一致性指标，且观测已经经过该布局筛选，存在选择偏差，不能当作绝对精度或独立验证误差。跟踪覆盖率表示有多少帧可以输出位姿；判断毫米级准确度还需要独立实测尺寸或外部定位真值。
+
+## 常用操作，按需要选
+
+下面是对第 2 步命令的调整，不是后续必做步骤：
+
+| 需要什么 | 怎么做 |
 |---|---|
-| `No meta_*.json found` | 跟踪命令需要原始录制根目录。检查是否误传了结果目录、`part0001/` 或 `recordings/` 的上层目录 |
-| 提示缺少 `global_poses.npz` 或 `tag_alignment.json` | 恢复命令需要成功生成统一位姿的多码结果根目录，不能传单码目录、`tag_0/` 或原始录制 |
-| `Cannot align tag IDs` | 多码缺少足够的共同解码观测；增加试跑帧数或补录清晰共同可见画面。当前至少需要 3 帧共同有效解码观测连接相关 ID，允许通过其他 ID 间接连接 |
-| `Cannot import the AprilTag binding` / `No module named apriltag` | 先编译，再使用与编译一致的 `/usr/bin/python3`；确认 `build/` 中有对应 Python 版本的 `apriltag.*.so` |
-| 提示缺少 `cv2`、`scipy`、`yaml` 等模块 | 在运行脚本所用的 Python 环境中安装依赖，参照安装章节 |
-| `Cached detection settings differ` | 去掉 `--reuse-detections`，重新生成当前设置的缓存 |
-| `Cannot open` / `Early video end` / 分辨率不符 | 检查录制是否完整，元数据、PTS、相机标定是否与视频配套；不要先裁剪或缩放视频 |
-| 尺度明显不对 | 核实 `--tagsize` 的测量边界和米单位；目录名中的尺寸后缀不会设置实际标签尺寸 |
-| 大量 `lost` | 先核对家族、ID、尺寸和画面清晰度；检查遮挡、模糊及重复标签，再考虑短缺口恢复 |
-| 恢复后还没有视频 | 继续执行 `render_ego_recovery.py`；确认 FFmpeg 可用且带 `libx264` |
-| 新终端中变量为空或路径不对 | 重新执行第一步的完整设置块；变量只保存在当前终端 |
+| 先试跑一小段，确认设置正确 | 在命令末尾加 `--max-frames 120 --output outputs/ego_check`，结果单独保存在 `outputs/ego_check/`；确认后用第 2 步原命令处理完整录制 |
+| 只保留视觉恢复，不插值补帧 | 将 `--max-gap-frames 3` 改为 `--max-gap-frames 0`，保留 `--recovery on` |
+| 已经检测过，只调整位姿或优化参数 | 在相同输出目录下加 `--reuse-detections`，省去重新检测；录制、家族、ID、处理帧数、光流帧数、计算后端和缓存版本须匹配 |
 
-结果目录重复使用时，同名数据和图表会被更新。需要保留某次结果时，为 `OUT` 换一个新的后缀；`recordings/`、`outputs/` 和 `build/` 都是本地目录，不随 Git 提交。
+其他标签 ID、指定结果目录和常见报错，见[安装与可选设置](docs/EGO_COMMANDS.md)。需要了解算法或坐标变换时，再看[技术说明](docs/EGO_MULTICAM.md)。

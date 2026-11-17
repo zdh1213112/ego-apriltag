@@ -11,12 +11,11 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation, Slerp
 
 from track_ego_apriltag import (
     AdaptiveFilter, STREAMS, export_global_results, load_recording, local_detection,
-    flow_corners, matrix, monocular_candidates, object_points, plot_tag_results, project_pose,
+    fit_rigid_detections, flow_corners, matrix, object_points, plot_tag_results, project_pose,
 )
 
 
@@ -24,89 +23,6 @@ def rigid_points(alignment, size):
     points = object_points(size)
     return {int(key): points @ np.array(value)[:3, :3].T + np.array(value)[:3, 3]
             for key, value in alignment["T_reference_tag"].items()}
-
-
-def fit_rigid_detections(detections, cameras, points, size, alignment, prior=None, max_error=3.):
-    """Choose among duplicate IDs using a common multi-tag, multi-camera pose."""
-    if not detections:
-        return None
-    groups = {}
-    hypotheses = [] if prior is None else [prior]
-    inverses = {int(key): np.linalg.inv(value) for key, value in alignment["T_reference_tag"].items()}
-    for observation in detections:
-        key = (observation["camera"], observation["tag_id"])
-        groups.setdefault(key, []).append(observation)
-        for R, t in monocular_candidates(observation, cameras[key[0]], object_points(size)):
-            if np.isfinite(t).all() and .03 < np.linalg.norm(t) < 20:
-                hypotheses.append(matrix(R, t) @ inverses[key[1]])
-
-    def assignments(T, threshold):
-        found, errors = [], []
-        for (camera_id, tag_id), choices in groups.items():
-            predicted = project_pose(cameras[camera_id], T[:3, :3], T[:3, 3], points[tag_id])
-            values = [float(np.sqrt(np.mean((predicted - row["corners"]) ** 2))) for row in choices]
-            best = int(np.argmin(values))
-            decoded_choices = [i for i, row in enumerate(choices)
-                               if row["source"] in ("decoded", "rectified") and values[i] <= values[best] + .5]
-            if decoded_choices:
-                best = min(decoded_choices, key=lambda index: values[index])
-            if values[best] <= threshold:
-                found.append(choices[best])
-                errors.append(values[best])
-        if prior is not None:
-            distant = (np.linalg.norm(T[:3, 3] - prior[:3, 3]) > .25
-                       or Rotation.from_matrix(prior[:3, :3].T @ T[:3, :3]).magnitude() > np.deg2rad(60))
-            tracked_cameras = {row["camera"] for row in found if row["source"] in ("backward_flow", "forward_flow")}
-            if distant and len(tracked_cameras) < 2:
-                return [], []
-        return found, errors
-
-    def score(found, errors):
-        return (len({row["tag_id"] for row in found}), len(found), -float(np.mean(errors))) if found else (0, 0, -np.inf)
-
-    ranked = []
-    for T in hypotheses:
-        found, errors = assignments(T, max_error * 2)
-        if found:
-            ranked.append((score(found, errors), T, found))
-    best = None
-    for _, T, found in sorted(ranked, key=lambda item: item[0], reverse=True)[:6]:
-        parameters = np.r_[Rotation.from_matrix(T[:3, :3]).as_rotvec(), T[:3, 3]]
-
-        def residual(parameters):
-            R = Rotation.from_rotvec(parameters[:3]).as_matrix()
-            return np.concatenate([
-                (project_pose(cameras[row["camera"]], R, parameters[3:], points[row["tag_id"]])
-                 - row["corners"]).ravel() for row in found
-            ])
-
-        for _ in range(2):
-            fitted = least_squares(residual, parameters, loss="soft_l1", f_scale=.8, max_nfev=50)
-            parameters = fitted.x
-            T = matrix(Rotation.from_rotvec(parameters[:3]).as_matrix(), parameters[3:])
-            found, errors = assignments(T, max_error)
-            if not found:
-                break
-        ids = sorted({row["tag_id"] for row in found})
-        camera_ids = {row["camera"] for row in found}
-        decoded = any(row["source"] in ("decoded", "rectified") for row in found)
-        tracked_cameras = {row["camera"] for row in found if row["source"] in ("backward_flow", "forward_flow")}
-        if not decoded and len(camera_ids) < 2:
-            continue
-        # A single ID is usable only with multi-view agreement and a nearby anchor prediction.
-        if not found or (len(ids) < 2 and (len(camera_ids) < 2 or prior is None)):
-            continue
-        if len(ids) == 1 and decoded and len(tracked_cameras) < 2 and (np.linalg.norm(T[:3, 3] - prior[:3, 3]) > .10
-                             or Rotation.from_matrix(prior[:3, :3].T @ T[:3, :3]).magnitude() > np.deg2rad(25)):
-            continue
-        current = score(found, errors)
-        if best is None or current > best[0]:
-            best = (current, {"R": T[:3, :3], "t": T[:3, 3], "source_tag_ids": ids,
-                              "n_views": len(camera_ids), "n_valid_tags": len(ids),
-                              "source_rms": float(np.sqrt(np.mean(np.square(errors)))),
-                              "status": "measured" if decoded else "flow_only",
-                              "observations": found})
-    return None if best is None else best[1]
 
 
 def fill_short_pose_gaps(results, max_frames=3, max_span_s=.15):
@@ -227,9 +143,15 @@ def main(argv=None):
     parser.add_argument("results", type=Path, help="Existing multi-tag output directory")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-gap-frames", type=int, default=3, help="Maximum interpolation gap; 0 disables interpolation")
+    parser.add_argument("--cutoff", type=float, default=4., help="Minimum adaptive filter cutoff, Hz")
+    parser.add_argument("--device", choices=("cpu", "cuda"),
+                        help="Detector backend; follows the original tracking results when omitted")
+    parser.add_argument("--max-reprojection", type=float, default=3., help="Maximum reprojection error, pixels")
     args = parser.parse_args(argv)
     if args.max_gap_frames < 0:
         parser.error("max-gap-frames must be nonnegative")
+    if any(not np.isfinite(value) or value <= 0 for value in (args.cutoff, args.max_reprojection)):
+        parser.error("cutoff and max-reprojection must be positive finite values")
     output = args.output or args.results.with_name(args.results.name + "_recovered")
     if output.resolve() == args.results.resolve():
         parser.error("output must differ from the original results directory")
@@ -248,8 +170,9 @@ def main(argv=None):
         for index in range(left, right + 1):
             fraction = (results[index]["time_s"] - a["time_s"]) / (b["time_s"] - a["time_s"])
             priors[index] = matrix(slerp(results[index]["time_s"]).as_matrix(), a["t"] * (1 - fraction) + b["t"] * fraction)
-    from apriltag import apriltag
-    detector = apriltag(summary["family"], threads=2, maxhamming=1, decimate=1., refine_edges=True)
+    from ego_detector import create_detector
+    args.device = args.device or summary.get("detector_device", "cpu")
+    detector = create_detector(summary["family"], args.device)
     detections = {index: [] for index in priors}
     for camera_id, stream in STREAMS.items():
         capture = cv2.VideoCapture(str(recording / metadata["files"][f"video_{stream}"]))
@@ -303,7 +226,8 @@ def main(argv=None):
     diagnostics = []
     recovered = [dict(row) for row in results]
     for index in sorted(priors):
-        fit = fit_rigid_detections(detections[index], cameras, points, summary["tagsize_m"], alignment, priors[index])
+        fit = fit_rigid_detections(detections[index], cameras, points, summary["tagsize_m"], alignment,
+                                   priors[index], max_error=args.max_reprojection)
         row = recovered[index]
         diagnostics.append({"frame": index, "original_status": row["status"], "detections": len(detections[index]),
                             "recovered_ids": [] if fit is None else fit["source_tag_ids"]})
@@ -317,7 +241,7 @@ def main(argv=None):
         print(f'frame {index}: {results[index]["status"]} -> {row["status"]}, IDs {row["source_tag_ids"]}', flush=True)
     recovered = reject_isolated_excursions(recovered)
     completed = fill_short_pose_gaps(recovered, args.max_gap_frames)
-    state = AdaptiveFilter()
+    state = AdaptiveFilter(args.cutoff)
     for row in completed:
         if row["status"] != "lost":
             row["filtered_R"], row["filtered_t"] = state.update(row["R"], row["t"], row["time_s"])
@@ -342,6 +266,9 @@ def main(argv=None):
         row = completed[item["frame"]]
         item.update(final_status=row["status"], pose_source=row["pose_source"])
     report = {"original_results": str(args.results.resolve()), "frames": len(results), "windows": windows,
+              "detector_device": args.device,
+              "settings": {"max_gap_frames": args.max_gap_frames, "cutoff": args.cutoff,
+                           "max_reprojection": args.max_reprojection},
               "original_gaps": [{"first_frame": int(run[0]), "last_frame": int(run[-1]), "frames": len(run),
                                   "start_time_s": results[run[0]]["time_s"], "end_time_s": results[run[-1]]["time_s"]}
                                  for run in original_gaps],

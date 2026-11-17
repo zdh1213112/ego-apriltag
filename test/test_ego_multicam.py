@@ -17,10 +17,10 @@ from scipy.spatial.transform import Rotation
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from track_ego_apriltag import (
-    Camera, STREAMS, TagTrackingState, aggregate_tag_status, associate_frames, collect_tag_observations,
+    Camera, PoseProjectionProblem, STREAMS, TagTrackingState, aggregate_tag_status, associate_frames, collect_tag_observations,
     estimate_tag_alignment, export_global_results, export_results, export_tag_results,
-    fit_pose, fuse_tag_results, load_recording, main, matrix, object_points, parse_args,
-    solve_sequence, track_tag, triangulate,
+    fit_pose, fuse_tag_results, load_recording, main, matrix, object_points, parse_args, pose_residual,
+    resolve_rigid_candidates, rigid_transform_consensus, solve_sequence, track_tag, triangulate,
 )
 
 
@@ -143,6 +143,40 @@ class MultiTagDetectionTests(unittest.TestCase):
         self.assertEqual(independent["tag_id"], 1)
         self.assertEqual(independent["source"], "decoded")
 
+    def test_duplicate_candidates_survive_collection_and_cache_reuse(self):
+        image = np.zeros((24, 32, 3), dtype=np.uint8)
+        metadata = {"files": {f"video_{stream}": f"{stream}.mp4" for stream in STREAMS.values()}}
+        cameras = {key: SimpleNamespace(width=32, height=24) for key in STREAMS}
+        timestamps = {key: np.array([1000]) for key in STREAMS}
+        target = self.detection(0)
+        background = {**target, "lb-rb-rt-lt": target["lb-rb-rt-lt"] + [15, 0]}
+        detector = Mock()
+        detector.detect.return_value = [background, target]
+        capture = Mock()
+        capture.read.return_value = (True, image)
+        args = SimpleNamespace(family="tag36h11", max_frames=0, flow_max_frames=0, reuse_detections=False)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidates = {}
+            with patch("apriltag.apriltag", return_value=detector), \
+                    patch("track_ego_apriltag.cv2.VideoCapture", return_value=capture):
+                collect_tag_observations(root, {0: root}, metadata, cameras, timestamps, args, candidates)
+                for camera in STREAMS:
+                    self.assertEqual(len(candidates[0][camera][0]), 2)
+                    np.testing.assert_allclose(candidates[0][camera][0][1]["corners"], target["lb-rb-rt-lt"])
+                args.reuse_detections = True
+                reused = {}
+                detector.detect.reset_mock()
+                collect_tag_observations(root, {0: root}, metadata, cameras, timestamps, args, reused)
+                self.assertEqual(reused, candidates)
+                detector.detect.assert_not_called()
+                cache = root / "observations_cam_0.json"
+                payload = json.loads(cache.read_text())
+                payload["config"]["tracking_version"] = 3
+                cache.write_text(json.dumps(payload))
+                with self.assertRaisesRegex(ValueError, "Cached detection settings differ"):
+                    collect_tag_observations(root, {0: root}, metadata, cameras, timestamps, args, {})
+
 
 class GlobalTrackingTests(unittest.TestCase):
     def rigid_sequences(self):
@@ -203,6 +237,106 @@ class GlobalTrackingTests(unittest.TestCase):
             row["status"] = "lost"
         with self.assertRaisesRegex(ValueError, "Cannot align tag IDs"):
             fuse_tag_results(tracks)
+
+    def test_first_requested_id_controls_reference_extrinsics(self):
+        tracks, expected, offsets = self.rigid_sequences()
+        tracks = {tag_id: tracks[tag_id] for tag_id in (1, 0, 2)}
+        results, alignment = fuse_tag_results(tracks)
+        self.assertEqual(alignment["reference_tag_id"], 1)
+        for tag_id, offset in offsets.items():
+            np.testing.assert_allclose(alignment["T_reference_tag"][str(tag_id)],
+                                       np.linalg.inv(offsets[1]) @ offset, atol=1e-12)
+        np.testing.assert_allclose(matrix(results[0]["R"], results[0]["t"]), expected[0] @ offsets[1], atol=1e-12)
+
+    def test_background_tag_cannot_bridge_a_rigid_calibration(self):
+        tracks = {tag_id: [] for tag_id in (0, 1, 2)}
+        for index in range(20):
+            for tag_id in tracks:
+                t = np.array([.03 * index + .04 * tag_id, .1, .5]) if tag_id != 2 else np.array([.3, .3, .5])
+                tracks[tag_id].append({"frame": index, "timestamp_us": index * 33333,
+                                       "time_s": index / 30, "status": "measured", "R": np.eye(3),
+                                       "t": t, "n_views": 3, "rms": .5, "cameras": ["cam_0", "cam_1", "cam_2"]})
+        alignment = estimate_tag_alignment(tracks, allow_partial=True)
+        self.assertEqual(alignment["unaligned_tag_ids"], [2])
+        self.assertEqual(alignment["paths"]["1"], [0, 1])
+        self.assertTrue(all(not edge["accepted"] for edge in alignment["edges"] if edge["to_id"] == 2))
+        tracks[0][-1]["status"] = tracks[1][-1]["status"] = "lost"
+        fused, _ = fuse_tag_results(tracks, alignment=alignment)
+        self.assertTrue(all(2 not in row["source_tag_ids"] for row in fused))
+        self.assertEqual(fused[-1]["status"], "lost")
+
+    def test_duplicate_detections_cannot_inflate_calibration_support(self):
+        result = rigid_transform_consensus([np.eye(3)] * 50, [np.zeros(3)] * 50,
+                                           frame_ids=[0] * 50, min_samples=3)
+        self.assertIsNone(result)
+
+    def test_main_selection_keeps_handheld_id_2_and_rejects_its_background_duplicate(self):
+        cameras = {f"cam_{i}": Camera(f"cam_{i}", np.array([[520., 0, 960.], [0, 520., 600.], [0, 0, 1.]]),
+                                     np.zeros(4), np.eye(3), np.array([-.1 * i, 0., 0.])) for i in range(2)}
+        offsets = {0: np.eye(4), 1: matrix(np.eye(3), np.array([.04, 0., .02])),
+                   2: matrix(Rotation.from_euler("y", -30, degrees=True).as_matrix(), np.array([.08, 0., .01]))}
+        tracks = {tag_id: [] for tag_id in offsets}
+        candidates = {tag_id: [] for tag_id in offsets}
+        background = matrix(np.eye(3), np.array([.35, .25, .5]))
+        targets = []
+        for index in range(20):
+            pose = matrix(Rotation.from_rotvec([.1, -.1, .02 * index]).as_matrix(), np.array([.02 * index, 0., .6]))
+            targets.append(pose)
+            for tag_id, offset in offsets.items():
+                target = pose @ offset
+                seed = background if tag_id == 2 else target
+                tracks[tag_id].append({"frame": index, "timestamp_us": index * 33333, "time_s": index / 30,
+                                       "status": "measured", "R": seed[:3, :3], "t": seed[:3, 3],
+                                       "n_views": 2, "rms": .5, "cameras": list(cameras)})
+                choices = []
+                for camera in cameras.values():
+                    for physical in ([background, target] if tag_id == 2 else [target]):
+                        xyz = object_points(.03) @ physical[:3, :3].T + physical[:3, 3]
+                        # Independent projection checks the production KB projection too.
+                        corners = cv2.fisheye.projectPoints((xyz @ camera.R.T + camera.t).reshape(-1, 1, 3),
+                                                           np.zeros(3), np.zeros(3), camera.K, camera.D)[0].reshape(4, 2)
+                        choices.append({"camera": camera.id, "tag_id": tag_id, "source": "decoded",
+                                        "corners": corners, "frame": index, "timestamp_us": index * 33333})
+                candidates[tag_id].append(choices)
+        args = SimpleNamespace(tagsize=.03, cutoff=4., max_reprojection=2.5,
+                               alignment_max_translation=.01, alignment_max_rotation=10.)
+        for reference_id, order in ((0, (0, 1, 2)), (2, (2, 0, 1))):
+            with self.subTest(reference_id=reference_id):
+                selected, alignment, report = resolve_rigid_candidates(
+                    candidates, {tag_id: tracks[tag_id] for tag_id in order}, cameras, args)
+                self.assertEqual(alignment["unaligned_tag_ids"], [])
+                self.assertEqual(alignment["reference_tag_id"], reference_id)
+                for tag_id, offset in offsets.items():
+                    np.testing.assert_allclose(alignment["T_reference_tag"][str(tag_id)],
+                                               np.linalg.inv(offsets[reference_id]) @ offset, atol=1e-6)
+                self.assertEqual(report["groups_with_multiple_candidates"], 40)
+                for index, frame in enumerate(selected[2]):
+                    self.assertEqual(len(frame), 2)
+                    for row in frame:
+                        target = candidates[2][index][1 if row["camera"] == "cam_0" else 3]
+                        np.testing.assert_allclose(row["corners"], target["corners"], atol=1e-6)
+        # A lone background detection cannot confirm its own incorrect seed pose.
+        for index in (8, 9):
+            tracks[0][index].update(R=background[:3, :3], t=background[:3, 3])
+            tracks[1][index]["status"] = "lost"
+            for tag_id in candidates:
+                candidates[tag_id][index] = []
+            for camera in cameras.values():
+                xyz = object_points(.03) @ background[:3, :3].T + background[:3, 3]
+                corners = cv2.fisheye.projectPoints((xyz @ camera.R.T + camera.t).reshape(-1, 1, 3),
+                                                   np.zeros(3), np.zeros(3), camera.K, camera.D)[0].reshape(4, 2)
+                candidates[0][index].append({"camera": camera.id, "tag_id": 0, "source": "decoded",
+                                             "corners": corners, "frame": index, "timestamp_us": index * 33333})
+        selected, _, _ = resolve_rigid_candidates(candidates, tracks, cameras, args)
+        self.assertTrue(all(not selected[tag_id][index] for tag_id in selected for index in (8, 9)))
+        # A recording that only sees the unambiguous reference still tracks it.
+        for tag_id in (1, 2):
+            for row in tracks[tag_id]:
+                row["status"] = "lost"
+            candidates[tag_id] = [[] for _ in range(20)]
+        selected, alignment, _ = resolve_rigid_candidates(candidates, tracks, cameras, args)
+        self.assertEqual(len(selected[0][0]), 2)
+        self.assertEqual(alignment["unaligned_tag_ids"], [1, 2])
 
     def test_global_pose_export_is_one_pose_per_frame_with_nan_for_loss(self):
         tracks, expected, _ = self.rigid_sequences()
@@ -274,6 +408,40 @@ class GeometryTests(unittest.TestCase):
             np.testing.assert_allclose(camera.project(points), observation["corners"], atol=1e-9)
             directions = points / np.linalg.norm(points, axis=1)[:, None]
             np.testing.assert_allclose(camera.unproject(observation["corners"]), directions, atol=1e-10)
+
+    def test_batched_kb_residual_and_analytic_jacobian(self):
+        observations = self.observations()
+        observations[1]["source"] = "flow"
+        points = object_points(self.size)
+        for parameters in (np.array([.1, -.2, .05, .2, -.1, .4]),
+                           np.array([.1, .2, -.1, .4, .1, -.05])):
+            with self.subTest(parameters=parameters):
+                problem = PoseProjectionProblem(observations, self.cameras, points)
+                np.testing.assert_allclose(problem.residual(parameters),
+                                           pose_residual(parameters, observations, self.cameras, points), atol=1e-10)
+                numerical = np.column_stack([
+                    (pose_residual(parameters + np.eye(6)[i] * 1e-6, observations, self.cameras, points)
+                     - pose_residual(parameters - np.eye(6)[i] * 1e-6, observations, self.cameras, points)) / 2e-6
+                    for i in range(6)])
+                np.testing.assert_allclose(problem.jacobian(parameters), numerical, atol=2e-5, rtol=1e-6)
+
+    def test_analytic_projection_handles_axis_and_different_tag_layout_points(self):
+        camera = self.cameras["cam_0"]
+        points = {0: np.array([[0., 0., 0.], [.02, 0., 0.], [.02, .02, 0.], [0., .02, 0.]]),
+                  1: object_points(self.size) + [.05, 0., .02]}
+        observations = [{"camera": camera.id, "tag_id": tag_id, "source": "decoded",
+                         "corners": np.zeros((4, 2))} for tag_id in points]
+        parameters = np.array([0., 0., 0., 0., 0., .4])
+        problem = PoseProjectionProblem(observations, self.cameras, points, weighted=False)
+
+        def residual(value):
+            return np.concatenate([pose_residual(value, [row], self.cameras, points[row["tag_id"]])
+                                   for row in observations])
+
+        numerical = np.column_stack([(residual(parameters + np.eye(6)[i] * 1e-6)
+                                      - residual(parameters - np.eye(6)[i] * 1e-6)) / 2e-6 for i in range(6)])
+        np.testing.assert_allclose(problem.residual(parameters), residual(parameters), atol=1e-10)
+        np.testing.assert_allclose(problem.jacobian(parameters), numerical, atol=2e-5, rtol=1e-6)
         # Beyond the pinhole hemisphere, the KB bearing still has an unambiguous direction.
         theta = np.deg2rad([0., 80., 89., 95.])
         rays = np.column_stack((np.sin(theta), np.zeros(4), np.cos(theta)))

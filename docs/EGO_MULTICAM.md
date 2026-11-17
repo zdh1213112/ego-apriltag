@@ -8,6 +8,7 @@
 | 路径 | 内容 | Git 管理 |
 |---|---|---|
 | `scripts/track_ego_apriltag.py` | 四相机联合位姿估计与跟踪 | 是 |
+| `scripts/ego_detector.py`、`scripts/ego_cuda/` | 可选 CUDA 全图检测后端与本地编译桥接 | 是 |
 | `example/python_demo.py` | 图片检测与单相机位姿估计 | 是 |
 | `example/generate_tag_examples.py` | 根据官方码表生成标签示例 | 是 |
 | `test/test_ego_multicam.py` | 相机几何、融合与状态门限测试 | 是 |
@@ -39,6 +40,8 @@ cmake --build build --parallel 4
 `requirements-ego.txt` 也列出了 Python 依赖，方便在自己的虚拟环境中安装。
 如果切换 Python 或 NumPy 环境，应使用目标环境重新编译 Python 绑定；运行脚本与编译环境保持一致。
 示例生成脚本的中文图示使用 Ubuntu 的 Noto CJK 字体。
+
+需要 NVIDIA GPU 检测时，先按[CUDA 编译说明](EGO_COMMANDS.md#启用-nvidia-gpu仅首次编译)执行一次 `bash scripts/setup_ego_cuda.sh`，再为主跟踪或一键流程增加 `--device cuda`。全图四边形检测由 GPU 执行，码字解码、局部重检、光流和 KB 多相机位姿拟合仍使用 CPU。原始鱼眼角点、同码候选筛选和外参检查保持原有处理流程。CPU 与 CUDA 的检测缓存通过后端配置区分，不能跨后端复用。
 
 ## 检测单张图片
 
@@ -91,6 +94,11 @@ python3 scripts/track_ego_apriltag.py \
 优先使用多相机观测并通过共同可见的 ID 连接各码，再把可用位姿换算到统一参考系后融合、统一滤波。
 ID 0 不可见时，可以由 ID 1 或 2 估计同一个 ID 0 参考坐标系的位姿。
 这按三个码相对固定来估计；腕带变形会影响统一位姿精度，码间关系应有足够的共同观测支持。
+
+参考标签可通过 `--tag-ids` 的顺序指定：例如 `--tag-ids 1 0 2 3` 跟踪四个码，并以 ID 1 为统一参考。
+此时 `tag_alignment.json` 的 `reference_tag_id` 为 `1`，`T_reference_tag` 表示各标签到 ID 1 的固定变换，
+满足 `p_reference = T_reference_tag @ p_tag`；ID 1 对应单位矩阵。统一位姿仍表达在头环的 `cam_0` 坐标系中，
+表示所选参考标签的中心和坐标轴在该相机坐标系中的位置与朝向。
 根目录 `tracking_status.png` 也是一条整体跟踪状态曲线；
 `tracking_status_by_id.png` 另外保留各 ID 与 `GLOBAL` 的状态对照。
 根目录的 `tracking_preview.mp4` 同时标注各 ID 和坐标轴，`summary.json` 汇总各码质量与覆盖率；
@@ -102,6 +110,20 @@ ID 0 不可见时，可以由 ID 1 或 2 估计同一个 ID 0 参考坐标系的
 `global_poses.csv` 和 `global_poses.npz` 保存每帧一份的统一位姿，包含实际参与融合的来源 ID；
 `global_poses.npz` 中 `T_cam0_global_raw`、`T_cam0_global_filtered` 的形状均为 `(帧数, 4, 4)`。
 `tag_alignment.json` 保存参考 ID、估计的码间变换、共同观测数量和对齐残差。
+
+多码主流程保留同一相机、同一 ID 的所有检测候选。先用独立位姿寻找刚性一致的标签对，
+默认至少半数共同有效帧符合位置 10 mm、朝向 10° 的固定变换约束；不合格的边在 `edges` 中记录
+`accepted=false` 和原因，不用于连接码间外参。对尚未对齐的 ID，再以可靠标签组的位姿为锚，
+从候选中寻找跨帧稳定的相对变换（至少 3 帧，长序列至少 10 帧，并覆盖至少 15% 的候选帧）。
+最后使用与离线恢复共享的刚性重投影筛选器，在每个相机、每个 ID 中选择目标候选。
+有多码锚点时，孤立单码不能用自己的独立初值确认背景候选；续跟优先使用最近的可靠位姿，
+离线初始化可使用 0.2 秒内相邻的多码锚点。没有多码锚点时，只接受没有同码歧义的初始观测。
+未可靠标定的码列入 `unaligned_tag_ids`，其主流程结果保留为 `lost`，不参与统一位姿。
+`candidate_calibrations` 记录从候选重新估计的外参及残差，`summary.json` 的 `candidate_selection`
+记录保留、剔除候选数量。场景中目标和背景都有 ID 2 时，可继续指定 `--tag-ids 0 1 2 3`。
+各 ID 目录的 `selected_observations_cam_*.json` 保存筛选后的目标观测，
+`observations_cam_*.json` 缓存保留初始独立跟踪观测及全部候选，供 `--reuse-detections` 重新标定和筛选。
+这需要共同观测和足够的目标运动；若目标码始终不可见或多个物体始终无法区分，不能可靠推断其布局。
 根目录 `poses.npz` 的变换数组形状为 `(帧数, 标签数, 4, 4)`，`status` 为 `(帧数, 标签数)`，
 `global_status` 和 `n_valid_tags` 为 `(帧数,)`；第二维的顺序由 `tag_ids` 数组指定：
 
@@ -169,6 +191,8 @@ python3 scripts/render_ego_recovery.py \
 
 ## 跟踪选项
 
+日常使用按 [三步操作](../README_EGO_4B.md) 执行；安装与可选参数见 [补充说明](EGO_COMMANDS.md)。下列参数供直接调用底层脚本时使用。
+
 常用选项：
 
 - `--max-frames 120`：先处理前 120 帧检查数据。
@@ -177,8 +201,10 @@ python3 scripts/render_ego_recovery.py \
 - `--flow-max-frames 15`：最多 15 帧没有重新解码时继续角点跟踪，30 fps 时约 0.5 秒。
 - `--flow-max-frames 0`：关闭光流续跟踪。
 - `--cutoff 4`：平滑滤波的最低截止频率，单位 Hz。
+- `--alignment-max-translation 0.01`：码间固定变换的位置一致性门限，单位为米。
+- `--alignment-max-rotation 10`：码间固定变换的朝向一致性门限，单位为度。
 
-旧版跟踪缓存的设置校验版本不同，更新代码后首次运行请不带 `--reuse-detections`，重新生成缓存。
+检测缓存版本为 4，包含同 ID 的全部候选。旧版缓存缺少被提前丢弃的候选，更新代码后首次运行请不带 `--reuse-detections`，重新生成缓存。
 
 ## 四路如何融合
 
