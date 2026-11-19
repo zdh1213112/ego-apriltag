@@ -6,3 +6,5 @@ scipy
 PyYAML
 matplotlib
 Pillow
+mcap
+mcap-protobuf-support

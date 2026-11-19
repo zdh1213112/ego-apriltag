@@ -26,6 +26,8 @@ class PipelineTests(unittest.TestCase):
             cuda = parse_args([*common, "--device", "cuda"])
             self.assertEqual(cuda.output.name, cpu.output.name + "_cuda")
             self.assertNotEqual(cpu.output, cuda.output)
+            unfiltered = parse_args([*common, "--device", "cuda", "--no-filter"])
+            self.assertEqual(unfiltered.output.name, cuda.output.name + "_no_filter")
 
     def test_complete_workflow_preserves_reference_paths_and_interpolation_choice(self):
         for visual_only in (False, True):
@@ -58,7 +60,7 @@ class PipelineTests(unittest.TestCase):
                         "--alignment-max-rotation", "5", "--recovery", "on", "--trail-seconds", "1.5"]
                 args.extend(["--device", "cuda" if visual_only else "cpu"])
                 if visual_only:
-                    args.extend(["--no-interpolation", "--reuse-detections"])
+                    args.extend(["--no-interpolation", "--reuse-detections", "--no-filter"])
                 else:
                     args.extend(["--max-gap-frames", "3"])
                 console = io.StringIO()
@@ -76,6 +78,8 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(float(calls[0][calls[0].index("--trail-seconds") + 1]), 1.5)
                 self.assertIn("--no-video", calls[0])
                 self.assertEqual("--reuse-detections" in calls[0], visual_only)
+                for command in calls[:2]:
+                    self.assertEqual("--no-filter" in command, visual_only)
                 for flag, value in (("--flow-max-frames", 7), ("--cutoff", 2), ("--max-reprojection", 1.25),
                                     ("--max-sync-us", 250), ("--alignment-max-translation", .005),
                                     ("--alignment-max-rotation", 5)):
@@ -91,6 +95,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(settings["flow_max_frames"], 7)
                 self.assertEqual(settings["max_gap_frames"], 0 if visual_only else 3)
                 self.assertEqual(settings["trail_seconds"], 1.5)
+                self.assertEqual(settings["no_filter"], visual_only)
 
     def test_recovery_can_be_disabled_without_losing_the_preview(self):
         with TemporaryDirectory() as temporary:

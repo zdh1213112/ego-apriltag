@@ -144,6 +144,7 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--max-gap-frames", type=int, default=3, help="Maximum interpolation gap; 0 disables interpolation")
     parser.add_argument("--cutoff", type=float, default=4., help="Minimum adaptive filter cutoff, Hz")
+    parser.add_argument("--no-filter", action="store_true", help="Skip pose smoothing")
     parser.add_argument("--device", choices=("cpu", "cuda"),
                         help="Detector backend; follows the original tracking results when omitted")
     parser.add_argument("--max-reprojection", type=float, default=3., help="Maximum reprojection error, pixels")
@@ -241,7 +242,7 @@ def main(argv=None):
         print(f'frame {index}: {results[index]["status"]} -> {row["status"]}, IDs {row["source_tag_ids"]}', flush=True)
     recovered = reject_isolated_excursions(recovered)
     completed = fill_short_pose_gaps(recovered, args.max_gap_frames)
-    state = AdaptiveFilter(args.cutoff)
+    state = AdaptiveFilter(None if args.no_filter else args.cutoff)
     for row in completed:
         if row["status"] != "lost":
             row["filtered_R"], row["filtered_t"] = state.update(row["R"], row["t"], row["time_s"])
@@ -268,7 +269,7 @@ def main(argv=None):
     report = {"original_results": str(args.results.resolve()), "frames": len(results), "windows": windows,
               "detector_device": args.device,
               "settings": {"max_gap_frames": args.max_gap_frames, "cutoff": args.cutoff,
-                           "max_reprojection": args.max_reprojection},
+                           "no_filter": args.no_filter, "max_reprojection": args.max_reprojection},
               "original_gaps": [{"first_frame": int(run[0]), "last_frame": int(run[-1]), "frames": len(run),
                                   "start_time_s": results[run[0]]["time_s"], "end_time_s": results[run[-1]]["time_s"]}
                                  for run in original_gaps],

@@ -45,6 +45,7 @@ def parse_args(argv=None):
     parser.add_argument("--trail-seconds", type=float, default=0., help="参考 ID 的轨迹拖影时长，单位秒；0 关闭")
     parser.add_argument("--flow-max-frames", type=int, default=15, help="未解码时最多续跟多少帧；0 关闭主跟踪光流")
     parser.add_argument("--cutoff", type=float, default=4., help="自适应滤波最低截止频率，单位 Hz")
+    parser.add_argument("--no-filter", action="store_true", help="跳过位姿滤波，仍导出原始位姿")
     parser.add_argument("--max-reprojection", type=float, default=2.5, help="主跟踪和恢复的重投影误差门限，单位像素")
     parser.add_argument("--max-sync-us", type=int, default=1000, help="相机间最大匹配时间差，单位微秒")
     parser.add_argument("--alignment-max-translation", type=float, default=.01, help="码间位置一致性门限，单位米")
@@ -78,7 +79,8 @@ def parse_args(argv=None):
         parser.error("请传入包含一个 meta_*.json 的原始录制目录")
     args.output = (args.output or ROOT / "outputs" / (
         f"{args.recording.name}_{args.tagsize * 1000:g}mm_ref{args.reference}"
-        + ("_cuda" if args.device == "cuda" else ""))).resolve()
+        + ("_cuda" if args.device == "cuda" else "")
+        + ("_no_filter" if args.no_filter else ""))).resolve()
     if args.output == args.recording or args.output.is_file():
         parser.error("结果目录必须与原始录制目录分开，且不能是文件")
     if args.recovery == "on" and not shutil.which("ffmpeg"):
@@ -104,12 +106,15 @@ def main(argv=None):
         track_command.append("--no-video")
     if args.reuse_detections:
         track_command.append("--reuse-detections")
+    if args.no_filter:
+        track_command.append("--no-filter")
     commands = [("跟踪标签并计算码间外参", track_command)]
     if recovery_enabled:
         commands.extend([("恢复短暂丢帧", [
             "recover_ego_apriltag.py", str(tracking), "--output", str(output),
             "--max-gap-frames", str(args.max_gap_frames), "--cutoff", str(args.cutoff),
             "--device", args.device,
+            *(["--no-filter"] if args.no_filter else []),
             "--max-reprojection", str(args.max_reprojection)]),
             ("生成预览视频", ["render_ego_recovery.py", "--trail-seconds", str(args.trail_seconds), str(output)])])
     output.mkdir(parents=True, exist_ok=True)

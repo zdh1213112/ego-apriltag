@@ -108,10 +108,19 @@ def load_recording(directory):
         cameras[camera.id] = camera
     if not np.allclose(cameras["cam_0"].R, np.eye(3)) or np.linalg.norm(cameras["cam_0"].t) > 1e-6:
         raise ValueError("cam_0 must be the reference camera")
+    files = metadata["files"]
+    missing_pts = [f"video_{stream}_pts" for stream in STREAMS.values() if f"video_{stream}_pts" not in files]
+    if missing_pts:
+        if Path(files.get("recording", "")).suffix.lower() != ".mcap":
+            raise ValueError(f"Recording metadata lacks timestamp files ({', '.join(missing_pts)}) "
+                             "and declares no MCAP recording")
+        from ego_mcap import read_mcap_recording
+        metadata, timestamps = read_mcap_recording(directory, metadata, STREAMS)
+        return metadata, cameras, timestamps
     # EGOViewer PTS CSVs may include optional gap/sequence columns (including blanks).
     # Only the first column, timestamp_us, is needed for frame association.
     timestamps = {
-        camera_id: np.loadtxt(directory / metadata["files"][f"video_{stream}_pts"],
+        camera_id: np.loadtxt(directory / files[f"video_{stream}_pts"],
                               delimiter=",", usecols=0, dtype=np.int64, skiprows=1, ndmin=1)
         for camera_id, stream in STREAMS.items()
     }
@@ -572,7 +581,7 @@ def collect_observations(directory, output, metadata, cameras, timestamps, args)
 
 
 class AdaptiveFilter:
-    """Causal position and SO(3) filtering with a motion-dependent cutoff."""
+    """Causal position and SO(3) filtering. A None cutoff passes poses through."""
     def __init__(self, cutoff=4., beta=8.):
         self.cutoff, self.beta = cutoff, beta
         self.R = self.t = self.raw_t = self.raw_R = self.timestamp = None
@@ -580,6 +589,8 @@ class AdaptiveFilter:
         self.angular_velocity = np.zeros(3)
 
     def update(self, R, t, timestamp):
+        if self.cutoff is None:
+            return R.copy(), t.copy()
         if self.timestamp is None or timestamp - self.timestamp > 0.2:
             self.R, self.t, self.raw_R, self.raw_t = R.copy(), t.copy(), R.copy(), t.copy()
             self.velocity[:] = 0
@@ -1430,6 +1441,7 @@ def parse_args(argv=None):
     parser.add_argument("--flow-max-frames", type=int, default=15,
                         help="Maximum frames tracked without decoding; flow-only poses require two views")
     parser.add_argument("--cutoff", type=float, default=4., help="Minimum causal filter cutoff, Hz")
+    parser.add_argument("--no-filter", action="store_true", help="Skip pose smoothing")
     parser.add_argument("--reuse-detections", action="store_true")
     parser.add_argument("--no-video", action="store_true")
     parser.add_argument("--trail-seconds", type=float, default=0., help="Reference tag motion trail duration; 0 disables")
@@ -1453,6 +1465,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.no_filter:
+        args.cutoff = None
     tag_ids = args.tag_ids if args.tag_ids is not None else [args.tag_id]
     try:
         metadata, cameras, timestamps = load_recording(args.recording)

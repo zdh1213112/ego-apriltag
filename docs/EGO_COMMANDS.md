@@ -24,6 +24,8 @@ cmake -S . -B build \
 cmake --build build --parallel 4
 ```
 
+读取 H.264 MCAP 录制还需要在运行跟踪器的 Python 环境中安装 `mcap` 和 `mcap-protobuf-support`。
+
 ## 启用 NVIDIA GPU：仅首次编译
 
 本机 RTX 5060 已编译好，直接在跟踪命令中写 `--device cuda`。新电脑需要 NVIDIA 驱动、支持该显卡的 CUDA Toolkit（含 `nvcc`）、上述 CPU 依赖和 `libgflags-dev`。本机验证使用 CUDA Toolkit 12.8、驱动 580.142。
@@ -58,6 +60,7 @@ GPU 来源为 [Team766/apriltags_cuda](https://github.com/Team766/apriltags_cuda
 | 使用 CPU 检测 | `--device cpu` |
 | 只跟踪 ID 0、1、2 | 把原来的 ID 列表替换为 `--tag-ids 0 1 2` |
 | 先试跑 120 帧 | `--max-frames 120` |
+| 跳过位姿滤波 | `--no-filter`，匹配使用指南的完整命令 |
 | 不插值补帧 | 将原来的插值帧数改成 `--max-gap-frames 0`，保留 `--recovery on` |
 | 关闭离线恢复，只跟踪并生成视频 | `--recovery off` |
 | 自己指定保存目录 | `--output outputs/my_result` |
@@ -66,10 +69,10 @@ GPU 来源为 [Team766/apriltags_cuda](https://github.com/Team766/apriltags_cuda
 
 ## 结果说明
 
-完成后，终端直接显示视频、外参和位姿的完整路径。使用指南中的 20 mm 尺寸和参考 ID 0 对应的结果目录为：
+完成后，终端直接显示视频、外参和位姿的完整路径。使用指南中 30 mm、参考 ID 0、CUDA 和 `--no-filter` 对应的结果目录为：
 
 ```text
-outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/
+outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter/
 ```
 
 | 文件 | 用途 |
@@ -84,11 +87,11 @@ outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/
 | `reference_trail.csv` | 开启拖影时导出的参考 ID 中心轨迹，坐标为头环 `cam_0`，单位米 |
 | `alignment_quality.json` | 运行外参检查后生成的内部一致性与分时段稳定性报告 |
 
-示例命令明确设置了光流、滤波、误差门限、离线恢复和插值帧数。`--recovery on` 时执行离线重检及双向光流，`--max-gap-frames 3` 允许最多 3 帧短缺口插值。插值结果是估计值，会标为 `interpolated`，视频中显示 `ESTIMATED`；长缺口保留为 `lost`。设为 `--recovery off` 时不做离线恢复或插值。
+示例命令通过 `--no-filter` 跳过位姿滤波。`--recovery on` 时执行离线重检及双向光流，`--max-gap-frames 3` 允许最多 3 帧短缺口插值。插值结果是估计值，会标为 `interpolated`，视频中显示 `ESTIMATED`；长缺口保留为 `lost`。设为 `--recovery off` 时不做离线恢复或插值。
 
 参考标签决定物体上哪个坐标系的位姿被输出，位置仍表达在头环 `cam_0` 坐标系中。未可靠标定的标签会明确列出，不参与融合。
 
-CUDA 默认目录有 `_cuda` 后缀，CPU 目录没有该后缀。再次运行相同录制、尺寸、参考 ID 和后端会更新同一个结果目录。需要保留旧结果时，用 `--output` 指定另一个目录。
+CUDA 默认目录有 `_cuda` 后缀，CPU 目录没有该后缀。再次运行相同录制、尺寸、参考 ID、后端和滤波配置会更新同一个结果目录。需要保留旧结果时，用 `--output` 指定另一个目录。
 
 程序会显示实际后端与分阶段进度。重复处理相同输入时可复用同一后端的检测缓存；它仍会重新做位姿拟合和刚性候选筛选。CPU 与 CUDA 缓存不能互相复用；切换后端时不要加 `--reuse-detections`。
 

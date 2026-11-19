@@ -6,9 +6,11 @@
 
 ## 1. 准备录制并进入项目
 
-先用 EGOViewer 录好四路相机视频，保留完整录制目录。下面使用本次的 `EGO-4B_AZLCA610091_20261117_110204`。
+先用 EGOViewer 录好四路相机视频，保留完整录制目录。下面使用本次的 `EGO-4B_AZLCA610091_20261119_181247`。
 
 录制目录里应能找到 `meta_*.json`。命令要指向这一层，不能指向里面的 `part0001/`，也不能填之前生成的结果目录。
+
+支持四路 MP4 配时间戳 CSV，也支持 EGOViewer 录制的 H.264 MCAP。两种格式使用同一条命令。对于 MCAP，程序从每路相机消息读取原始时间戳，用 FFmpeg 临时封装视频供跟踪、恢复和预览使用。
 
 ```bash
 cd /home/zdh/apriltag
@@ -22,14 +24,14 @@ cd /home/zdh/apriltag
 
 ```bash
 /usr/bin/python3 scripts/run_ego_apriltag.py \
-  recordings/EGO-4B_AZLCA610091_20261117_110204 \
+  recordings/EGO-4B_AZLCA610091_20261119_181247 \
   --family tag36h11 \
   --tag-ids 0 1 2 3 \
-  --tagsize 0.020 \
+  --tagsize 0.030 \
   --reference 0 \
   --device cuda \
   --flow-max-frames 15 \
-  --cutoff 4 \
+  --no-filter \
   --max-sync-us 1000 \
   --max-reprojection 2.5 \
   --alignment-max-translation 0.010 \
@@ -39,14 +41,16 @@ cd /home/zdh/apriltag
   --trail-seconds 1.5
 ```
 
+这条命令使用 `--no-filter` 导出未滤波位姿。需要自适应平滑时，将它替换为 `--cutoff 4`。
+
 命令中明确指定标签和计算后端，换录制时逐项核对：
 
 | 命令中的内容 | 含义 | 怎么改 |
 |---|---|---|
-| `recordings/EGO-4B_AZLCA610091_20261117_110204` | 原始录制路径 | 换成自己的录制目录；也可以使用完整路径 |
+| `recordings/EGO-4B_AZLCA610091_20261119_181247` | 原始录制路径 | 换成自己的录制目录；也可以使用完整路径 |
 | `--family tag36h11` | 标签家族 | 填实际使用的标签家族 |
 | `--tag-ids 0 1 2 3` | 需要跟踪的标签 ID | 写出目标物体上的所有标签 ID |
-| `--tagsize 0.020` | 标签边长，单位为米 | 20 mm 填 `0.020`，30 mm 填 `0.030` |
+| `--tagsize 0.030` | 标签边长，单位为米 | 20 mm 填 `0.020`，30 mm 填 `0.030` |
 | `--reference 0` | 以 ID 0 的中心和坐标轴为物体参考 | 以 ID 1 为参考时改成 `--reference 1` |
 | `--device cuda` | 用 NVIDIA GPU 加速全图标签检测 | 使用 CPU 时明确改成 `--device cpu` |
 
@@ -60,6 +64,7 @@ cd /home/zdh/apriltag
 |---|---|---|
 | `--flow-max-frames 15` | 未重新解码时最多续跟踪 15 帧 | `0` 关闭主跟踪光流；增大可能增加漂移 |
 | `--cutoff 4` | 自适应平滑的最低截止频率，单位 Hz | 调小主要增强低速平滑，也会增加延迟；同时用于主跟踪和恢复结果 |
+| `--no-filter` | 跳过主跟踪和恢复阶段的位姿滤波 | `filtered_*` 字段沿用 `raw_*` 位姿，默认输出目录增加 `_no_filter` 后缀 |
 | `--max-sync-us 1000` | 跨相机观测匹配允许的最大时间差，单位微秒 | 必须与实际相机同步情况相符 |
 | `--max-reprojection 2.5` | 重投影误差门限，单位像素 | 调小检查更严格，也可能增加丢帧；同时用于主跟踪和恢复 |
 | `--alignment-max-translation 0.010` | 码间位置一致性门限，单位米；这里为 10 mm | 需要更严格时可收紧，可能使部分码无法标定 |
@@ -74,7 +79,7 @@ cd /home/zdh/apriltag
 
 | 终端进度 | 自动处理的内容 |
 |---|---|
-| `1/3 跟踪标签并计算码间外参` | 筛选背景同码、多相机拟合、异常观测剔除、码间标定和位姿滤波 |
+| `1/3 跟踪标签并计算码间外参` | 筛选背景同码、多相机拟合、异常观测剔除和码间标定 |
 | `2/3 恢复短暂丢帧` | 重新检测、双向光流恢复，并尝试插值补齐符合条件的短缺口 |
 | `3/3 生成预览视频` | 用最终位姿生成四相机预览视频 |
 
@@ -89,7 +94,7 @@ cd /home/zdh/apriltag
 结束时终端会直接打印“视频”“外参”“位姿”的完整路径。上面的命令对应结果目录为：
 
 ```text
-outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/
+outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter/
 ```
 
 | 先后顺序 | 文件 | 用途 |
@@ -104,7 +109,7 @@ outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/
 
 本例显式设置最多插值补 3 帧，且两端有效位姿间隔还须不超过 0.15 秒。插值是估计值，视频显示 `ESTIMATED`，数据标为 `interpolated`；长缺口保留为 `lost`。无法可靠标定的 ID 会被列出，不参与融合。
 
-CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没有这个后缀。再次运行相同录制、尺寸、参考 ID 和后端会更新同一目录。使用 `--output` 时以指定路径为准。
+CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没有这个后缀。再次运行相同录制、尺寸、参考 ID、后端和滤波配置会更新同一目录。使用 `--output` 时以指定路径为准。
 
 ## 已经处理完成：只给视频加拖影
 
@@ -112,9 +117,9 @@ CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没�
 
 ```bash
 /usr/bin/python3 scripts/render_ego_recovery.py \
-  outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda \
+  outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter \
   --trail-seconds 1.5 \
-  --output outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda/with_trail
+  --output outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter/with_trail
 ```
 
 完成后查看 `with_trail/tracking_preview.mp4`，原来的预览视频保留。`with_trail/reference_trail.csv` 保存各帧轨迹点和状态。
@@ -125,7 +130,7 @@ CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没�
 
 ```bash
 /usr/bin/python3 scripts/check_ego_alignment.py \
-  outputs/EGO-4B_AZLCA610091_20261117_110204_20mm_ref0_cuda
+  outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter
 ```
 
 检查报告保存为 `alignment_quality.json`，统计各标签相对参考 ID 的位置、朝向偏差，以及前后半段估计的差异。检查仅使用两个标签均有至少两路相机支持的解码位姿，排除纯光流和插值帧。
