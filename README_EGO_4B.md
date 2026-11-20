@@ -4,6 +4,8 @@
 
 本机已经安装好 CPU 和 CUDA 检测后端，直接从第 1 步开始。新电脑先完成一次[安装与编译](docs/EGO_COMMANDS.md#首次使用安装与检查)；使用 NVIDIA GPU 时再完成[CUDA 后端编译](docs/EGO_COMMANDS.md#启用-nvidia-gpu仅首次编译)。
 
+想从源码理解输出位姿，可先读[四目联合求解、码间外参与多码融合](docs/EGO_MULTICAM.md#四路如何融合)。其中用同一段 30 mm 录像说明了外参如何连接，以及一次丢帧恢复实际用了哪些角点。
+
 ## 1. 准备录制并进入项目
 
 先用 EGOViewer 录好四路相机视频，保留完整录制目录。下面使用本次的 `EGO-4B_AZLCA610091_20261119_181247`。
@@ -42,6 +44,8 @@ cd /home/zdh/apriltag
 ```
 
 这条命令使用 `--no-filter` 导出未滤波位姿。需要自适应平滑时，将它替换为 `--cutoff 4`。
+
+处理 30 mm 录像 `181120` 时，可直接复制[多相机丢帧恢复命令](#30-mm-录像-181120-的丢帧恢复命令)。
 
 命令中明确指定标签和计算后端，换录制时逐项核对：
 
@@ -111,6 +115,36 @@ outputs/EGO-4B_AZLCA610091_20261119_181247_30mm_ref0_cuda_no_filter/
 
 CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没有这个后缀。再次运行相同录制、尺寸、参考 ID、后端和滤波配置会更新同一目录。使用 `--output` 时以指定路径为准。
 
+## 30 mm 录像 181120 的丢帧恢复命令
+
+在项目根目录执行。以下命令处理整段录像，在鱼眼原图上重读码格，再用多相机图像跟踪补齐短缺口。
+
+```bash
+/usr/bin/python3 scripts/run_ego_apriltag.py \
+  recordings/EGO-4B_AZLCA610091_20261119_181120 \
+  --family tag36h11 --tag-ids 0 1 2 3 --tagsize 0.030 --reference 0 \
+  --device cuda --flow-max-frames 15 --cutoff 4 \
+  --max-sync-us 1000 --max-reprojection 2.5 \
+  --alignment-max-translation 0.010 --alignment-max-rotation 10 \
+  --recovery on --pattern-recovery --patch-recovery \
+  --max-gap-frames 3 --trail-seconds 1.5
+```
+
+本次复用了第一次跟踪生成的 `tracking/` 和码间外参。已有同一份跟踪结果时，可以只跑恢复和视频渲染。
+
+```bash
+base_dir=outputs/EGO-4B_AZLCA610091_20261119_181120_30mm_ref0_cuda
+result_dir="${base_dir}_patch_pattern"
+/usr/bin/python3 scripts/recover_ego_apriltag.py "${base_dir}/tracking" \
+  --output "$result_dir" --device cuda --max-sync-us 1000 --max-reprojection 2.5 \
+  --cutoff 4 --max-gap-frames 3 --pattern-recovery --patch-recovery && \
+/usr/bin/python3 scripts/render_ego_recovery.py "$result_dir" --trail-seconds 1.5
+```
+
+该录像本次处理共 1971 帧，其中 1938 帧有视觉依据，12 帧为插值，21 帧为 `lost`。结果位于 `outputs/EGO-4B_AZLCA610091_20261119_181120_30mm_ref0_cuda_patch_pattern/`。
+
+同段 Nokov 动捕提供了 1679 帧可对齐的速度。以 ID 0 中心相对 `cam_0` 的线速度计，低于 0.46 m/s 时丢失 2/1485 帧，达到或超过 0.46 m/s 时丢失 19/194 帧。这个值是该录像的经验预警线。结果目录中的 `nokov_motion/frame_motion.json` 保存逐帧线速度、角速度和出现方向性拖影的相机。
+
 ## 已经处理完成：只给视频加拖影
 
 已有位姿时，直接执行下面这条命令，读取原始视频重新渲染，不重复检测或求解位姿：
@@ -145,6 +179,8 @@ CUDA 结果目录自动加 `_cuda`，保留之前的 CPU 结果；CPU 目录没�
 |---|---|
 | 先试跑一小段，确认设置正确 | 在命令末尾加 `--max-frames 120 --output outputs/ego_check`，结果单独保存在 `outputs/ego_check/`；确认后用第 2 步原命令处理完整录制 |
 | 只保留视觉恢复，不插值补帧 | 将 `--max-gap-frames 3` 改为 `--max-gap-frames 0`，保留 `--recovery on` |
+| 快速运动导致标签模糊时再尝试恢复 | 在 `--recovery on` 下加 `--patch-recovery`。程序从附近已解码的标签跟踪图像块，通过多相机检查的新增位姿在 CSV 中标为 `flow_only / patch_flow`。默认结果目录加 `_patch` 后缀 |
+| 用已知码间外参找回缺帧里的可读码格 | 加 `--pattern-recovery`，可和 `--patch-recovery` 同用。程序在同步鱼眼原图中重新读取 `tag36h11` 的 36 个码格，通过至少两路相机的重投影检查后标为 `measured / pattern_redetected`。逐相机的 ID、码字误差和角点保存在 `summary.json` 的 `pattern_redetections`。需要 OpenCV 的 `aruco` 模块，默认结果目录加 `_pattern` 后缀 |
 | 已经检测过，只调整位姿或优化参数 | 在相同输出目录下加 `--reuse-detections`，省去重新检测；录制、家族、ID、处理帧数、光流帧数、计算后端和缓存版本须匹配 |
 
 其他标签 ID、指定结果目录和常见报错，见[安装与可选设置](docs/EGO_COMMANDS.md)。需要了解算法或坐标变换时，再看[技术说明](docs/EGO_MULTICAM.md)。

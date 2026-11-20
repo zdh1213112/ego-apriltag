@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def show_progress(log_path, stopped):
     """Forward frame progress while keeping detailed reports in the log."""
-    pattern = re.compile(r"^(CUDA detector:|cam_\d \d+/\d+|pose \d+/\d+|Solving |Selecting rigid |ID \d+:|Re-detected |Rendered |Saved )")
+    pattern = re.compile(r"^(CUDA detector:|cam_\d \d+/\d+|pose \d+/\d+|Solving |Selecting rigid |ID \d+:|Re-detected |Re-decoded |Rendered |Saved )")
     with log_path.open(errors="replace") as stream:
         while True:
             for line in stream:
@@ -51,10 +51,16 @@ def parse_args(argv=None):
     parser.add_argument("--alignment-max-translation", type=float, default=.01, help="码间位置一致性门限，单位米")
     parser.add_argument("--alignment-max-rotation", type=float, default=10., help="码间朝向一致性门限，单位度")
     parser.add_argument("--recovery", choices=("on", "off"), default="on", help="是否执行离线重检和双向光流恢复")
+    parser.add_argument("--patch-recovery", action="store_true", help="从缺口附近已解码的标签启动局部图像块跟踪")
+    parser.add_argument("--pattern-recovery", action="store_true", help="在鱼眼原图中重新读取 tag36h11 码格，至少两路相机验证")
     interpolation = parser.add_mutually_exclusive_group()
     interpolation.add_argument("--max-gap-frames", type=int, default=3, help="恢复阶段最多插值补多少帧；0 不插值")
     interpolation.add_argument("--no-interpolation", action="store_true", help="等同 --max-gap-frames 0")
     args = parser.parse_args(argv)
+    if args.patch_recovery and args.recovery == "off":
+        parser.error("--patch-recovery 需要 --recovery on")
+    if args.pattern_recovery and (args.family != "tag36h11" or args.recovery == "off"):
+        parser.error("--pattern-recovery 需要 --family tag36h11 和 --recovery on")
     if args.device == "cuda" and args.family != "tag36h11":
         parser.error("当前 CUDA 后端仅支持 --family tag36h11；其他家族使用 --device cpu")
     if not math.isfinite(args.tagsize) or args.tagsize <= 0:
@@ -80,6 +86,8 @@ def parse_args(argv=None):
     args.output = (args.output or ROOT / "outputs" / (
         f"{args.recording.name}_{args.tagsize * 1000:g}mm_ref{args.reference}"
         + ("_cuda" if args.device == "cuda" else "")
+        + ("_patch" if args.patch_recovery else "")
+        + ("_pattern" if args.pattern_recovery else "")
         + ("_no_filter" if args.no_filter else ""))).resolve()
     if args.output == args.recording or args.output.is_file():
         parser.error("结果目录必须与原始录制目录分开，且不能是文件")
@@ -115,6 +123,9 @@ def main(argv=None):
             "--max-gap-frames", str(args.max_gap_frames), "--cutoff", str(args.cutoff),
             "--device", args.device,
             *(["--no-filter"] if args.no_filter else []),
+            *(["--patch-recovery"] if args.patch_recovery else []),
+            *(["--pattern-recovery"] if args.pattern_recovery else []),
+            *(["--max-sync-us", str(args.max_sync_us)] if args.patch_recovery or args.pattern_recovery else []),
             "--max-reprojection", str(args.max_reprojection)]),
             ("生成预览视频", ["render_ego_recovery.py", "--trail-seconds", str(args.trail_seconds), str(output)])])
     output.mkdir(parents=True, exist_ok=True)

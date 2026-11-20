@@ -67,7 +67,8 @@ def draw_recovered_frame(image, camera, row, pose, transforms, size):
             draw_tag_overlay(image, camera, None, {"status": status, "R": tag_pose[:3, :3],
                                                   "t": tag_pose[:3, 3]}, tag_id, axes)
     source_names = {"original": "original", "original_unverified": "original / unverified",
-                    "redetected": "re-detected", "flow_recovered": "flow recovered",
+                    "redetected": "re-detected", "pattern_redetected": "pattern re-detected",
+                    "flow_recovered": "flow recovered", "patch_flow": "patch flow",
                     "interpolated": "interpolated / no image measurement"}
     state = "ESTIMATED" if estimated else ("LOST" if status == "lost" else "TRACKING")
     source_text = source_names.get(source, source)

@@ -148,9 +148,14 @@ def main(argv=None):
     parser.add_argument("--device", choices=("cpu", "cuda"),
                         help="Detector backend; follows the original tracking results when omitted")
     parser.add_argument("--max-reprojection", type=float, default=3., help="Maximum reprojection error, pixels")
+    parser.add_argument("--patch-recovery", action="store_true", help="Track tag patches from nearby decoded anchors")
+    parser.add_argument("--pattern-recovery", action="store_true", help="Read tag36h11 cells in at least two raw views")
+    parser.add_argument("--max-sync-us", type=int, default=1000, help="Maximum camera offset for patch and pattern recovery")
     args = parser.parse_args(argv)
     if args.max_gap_frames < 0:
         parser.error("max-gap-frames must be nonnegative")
+    if args.max_sync_us < 0:
+        parser.error("max-sync-us must be nonnegative")
     if any(not np.isfinite(value) or value <= 0 for value in (args.cutoff, args.max_reprojection)):
         parser.error("cutoff and max-reprojection must be positive finite values")
     output = args.output or args.results.with_name(args.results.name + "_recovered")
@@ -160,10 +165,13 @@ def main(argv=None):
     summary = json.loads((args.results / "summary.json").read_text())
     alignment = json.loads((args.results / "tag_alignment.json").read_text())
     recording = Path(summary["recording"])
-    metadata, cameras, _ = load_recording(recording)
+    metadata, cameras, timestamps = load_recording(recording)
     results, tag_results = load_results(args.results)
     windows = recovery_windows(results)
     points = rigid_points(alignment, summary["tagsize_m"])
+    if args.pattern_recovery:
+        from ego_pattern_recovery import PatternDecoder, recover_pattern_gaps
+        pattern_decoder = PatternDecoder(summary["family"], points)
     priors = {}
     for left, right in windows:
         a, b = results[left], results[right]
@@ -241,6 +249,19 @@ def main(argv=None):
             row["pose_source"] = "original_unverified"
         print(f'frame {index}: {results[index]["status"]} -> {row["status"]}, IDs {row["source_tag_ids"]}', flush=True)
     recovered = reject_isolated_excursions(recovered)
+    rejected_indices = [i for i, row in enumerate(recovered) if row["pose_source"] == "rejected_isolated_excursion"]
+    if args.pattern_recovery:
+        pattern_reads = recover_pattern_gaps(recovered, recording, metadata, cameras, timestamps, points,
+                                             summary["tagsize_m"], alignment, pattern_decoder,
+                                             args.max_reprojection, args.max_sync_us)
+        print(f"Re-decoded raw tag patterns in multiple views for {len(pattern_reads)} frames", flush=True)
+    patch_frames = []
+    if args.patch_recovery:
+        from ego_patch_flow import recover_patch_gaps
+        patch_frames = recover_patch_gaps(recovered, recording, metadata, cameras, timestamps, points,
+                                          summary["tagsize_m"], alignment, detector,
+                                          args.max_reprojection, args.max_sync_us)
+        print(f"Recovered {len(patch_frames)} frames from nearby decoded tag patches", flush=True)
     completed = fill_short_pose_gaps(recovered, args.max_gap_frames)
     state = AdaptiveFilter(None if args.no_filter else args.cutoff)
     for row in completed:
@@ -275,18 +296,25 @@ def main(argv=None):
                                  for run in original_gaps],
               "original_lost_frames": sum(row["status"] == "lost" for row in results),
               "remaining_lost_frames": sum(row["status"] == "lost" for row in completed),
-              "redetected_original_lost_frames": sum(a["status"] == "lost" and b["pose_source"] == "redetected" for a, b in zip(results, completed)),
-              "flow_recovered_original_lost_frames": sum(a["status"] == "lost" and b["pose_source"] == "flow_recovered" for a, b in zip(results, completed)),
+              "redetected_original_lost_frames": sum(a["status"] == "lost" and b["pose_source"] in ("redetected", "pattern_redetected") for a, b in zip(results, completed)),
+              "flow_recovered_original_lost_frames": sum(a["status"] == "lost" and b["pose_source"] in ("flow_recovered", "patch_flow") for a, b in zip(results, completed)),
               "interpolated_frames": sum(row["status"] == "interpolated" for row in completed),
-              "rejected_excursion_frames": [index for index, row in enumerate(recovered) if row["pose_source"] == "rejected_isolated_excursion"],
+              "rejected_excursion_frames": rejected_indices,
               "image_supported_frames": sum(row["status"] in ("measured", "flow_only") for row in completed),
               "completed_frames": sum(row["status"] != "lost" for row in completed),
               "diagnostics": diagnostics,
               "limitations": ["Uses fixed inter-tag transforms estimated from the recording.",
                               "Interpolation is an estimate, not a visual measurement; long and unbounded gaps remain lost.",
                               "Only windows near original tracking gaps and isolated single-ID spikes are re-detected."]}
+    if args.patch_recovery:
+        report["settings"].update(patch_recovery=True, max_sync_us=args.max_sync_us)
+        report["patch_flow_frames"] = patch_frames
+        report["limitations"][-1] = "Patch tracking starts from nearby decoded tags and provides flow-only poses."
+    if args.pattern_recovery:
+        report["settings"].update(pattern_recovery=True, max_sync_us=args.max_sync_us)
+        report["pattern_redetections"] = pattern_reads
     (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({key: value for key, value in report.items() if key != "diagnostics"}, indent=2), flush=True)
+    print(json.dumps({k: v for k, v in report.items() if k not in ("diagnostics", "pattern_redetections")}, indent=2), flush=True)
 
 
 if __name__ == "__main__":

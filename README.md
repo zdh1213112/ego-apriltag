@@ -6,6 +6,7 @@ EGO 四相机 AprilTag Python 扩展
 原始 AprilTag 库、提交历史与许可证保留，官方项目说明见下文。
 
 - [EGO-4B 日常使用：一条命令完成跟踪、恢复和视频](README_EGO_4B.md)
+- [求解原理与源码入口：四目如何确定一个位姿、四码外参怎样标定、哪些步骤取平均](docs/EGO_MULTICAM.md#四路如何融合)
 - [EGO-4B 安装与可选设置](docs/EGO_COMMANDS.md)
 - [EGO 四相机跟踪：安装、运行、坐标系和输出说明](docs/EGO_MULTICAM.md)
 - [四相机跟踪源码](scripts/track_ego_apriltag.py)

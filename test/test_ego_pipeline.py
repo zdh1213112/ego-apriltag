@@ -26,6 +26,10 @@ class PipelineTests(unittest.TestCase):
             cuda = parse_args([*common, "--device", "cuda"])
             self.assertEqual(cuda.output.name, cpu.output.name + "_cuda")
             self.assertNotEqual(cpu.output, cuda.output)
+            patch_flow = parse_args([*common, "--device", "cuda", "--recovery", "on", "--patch-recovery"])
+            self.assertEqual(patch_flow.output.name, cuda.output.name + "_patch")
+            patterns = parse_args([*common, "--device", "cuda", "--recovery", "on", "--patch-recovery", "--pattern-recovery"])
+            self.assertEqual(patterns.output.name, patch_flow.output.name + "_pattern")
             unfiltered = parse_args([*common, "--device", "cuda", "--no-filter"])
             self.assertEqual(unfiltered.output.name, cuda.output.name + "_no_filter")
 
@@ -60,7 +64,8 @@ class PipelineTests(unittest.TestCase):
                         "--alignment-max-rotation", "5", "--recovery", "on", "--trail-seconds", "1.5"]
                 args.extend(["--device", "cuda" if visual_only else "cpu"])
                 if visual_only:
-                    args.extend(["--no-interpolation", "--reuse-detections", "--no-filter"])
+                    args.extend(["--no-interpolation", "--reuse-detections", "--patch-recovery",
+                                 "--pattern-recovery", "--no-filter"])
                 else:
                     args.extend(["--max-gap-frames", "3"])
                 console = io.StringIO()
@@ -78,8 +83,12 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(float(calls[0][calls[0].index("--trail-seconds") + 1]), 1.5)
                 self.assertIn("--no-video", calls[0])
                 self.assertEqual("--reuse-detections" in calls[0], visual_only)
+                self.assertEqual("--patch-recovery" in calls[1], visual_only)
                 for command in calls[:2]:
                     self.assertEqual("--no-filter" in command, visual_only)
+                self.assertEqual("--pattern-recovery" in calls[1], visual_only)
+                if visual_only:
+                    self.assertEqual(calls[1][calls[1].index("--max-sync-us") + 1], "250")
                 for flag, value in (("--flow-max-frames", 7), ("--cutoff", 2), ("--max-reprojection", 1.25),
                                     ("--max-sync-us", 250), ("--alignment-max-translation", .005),
                                     ("--alignment-max-rotation", 5)):
